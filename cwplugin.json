@@ -1,0 +1,12 @@
+{
+  "id": "com.classwidgets.duty-student",
+  "name": "值日生",
+  "version": "1.0.0",
+  "api_version": "~=0.4.2",
+  "entry": "main.py",
+  "author": "",
+  "description": "显示今日值日生，支持自定义分组并按周轮换",
+  "url": "",
+  "readme": "README.md",
+  "icon": "icon.png"
+}
