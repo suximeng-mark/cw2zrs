@@ -171,18 +171,33 @@ class Plugin(CW2Plugin):
             for g in self.config.groups
         ]
 
-    @Slot("QVariant")
-    def save_groups(self, data: Any) -> None:
-        """保存分组配置（QML 直接传入 JS 数组对象）"""
+    @Slot(str, "QVariant")
+    def save_all(self, start_date: str, data: Any) -> None:
+        """一次性保存起始日期和分组配置（推荐使用）。
+
+        QML 端调用示例：
+            backend.save_all(startDateText, JSON.stringify(groupsData))
+        """
+        import json
+        from loguru import logger
+
         try:
-            if isinstance(data, str):
-                import json
+            # 解析分组数据
+            if isinstance(data, (str, bytes, bytearray)):
                 data = json.loads(data)
+            else:
+                try:
+                    data = json.loads(json.dumps(data, default=lambda o: dict(o)))
+                except TypeError:
+                    pass
+
             if not isinstance(data, list):
-                raise ValueError("groups data must be a list")
+                raise ValueError(f"groups data must be a list, got {type(data)}")
 
             groups: List[DutyGroup] = []
             for g in data:
+                if not isinstance(g, dict):
+                    raise ValueError(f"group must be a dict, got {type(g)}")
                 members = [
                     DutyMember(
                         name=str(m.get("name", "") or ""),
@@ -190,12 +205,29 @@ class Plugin(CW2Plugin):
                     )
                     for m in (g.get("members", []) or [])
                 ]
-                groups.append(DutyGroup(name=str(g.get("name", "") or "未命名组"), members=members))
+                groups.append(
+                    DutyGroup(
+                        name=str(g.get("name", "") or "未命名组"),
+                        members=members,
+                    )
+                )
+
+            self.config.start_date = str(start_date or "")
             self.config.groups = groups
             self.api.config.save()
             self.dutyChanged.emit()
+            logger.info(
+                f"[值日生] 保存成功：{len(groups)} 组, 起始日期={self.config.start_date}"
+            )
         except Exception as e:
-            print(f"[值日生] 保存分组失败: {e}")
+            logger.error(f"[值日生] 保存失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    @Slot("QVariant")
+    def save_groups(self, data: Any) -> None:
+        """仅保存分组（兼容旧调用，建议改用 save_all）。"""
+        self.save_all(self.config.start_date, data)
 
     @Slot(result=str)
     def get_start_date(self) -> str:
