@@ -171,20 +171,26 @@ class Plugin(CW2Plugin):
             for g in self.config.groups
         ]
 
-    @Slot(str)
-    def save_groups(self, json_str: str) -> None:
-        """保存分组配置（QML 传入 JSON 字符串）"""
-        import json
-
+    @Slot("QVariant")
+    def save_groups(self, data: Any) -> None:
+        """保存分组配置（QML 直接传入 JS 数组对象）"""
         try:
-            data = json.loads(json_str)
+            if isinstance(data, str):
+                import json
+                data = json.loads(data)
+            if not isinstance(data, list):
+                raise ValueError("groups data must be a list")
+
             groups: List[DutyGroup] = []
             for g in data:
                 members = [
-                    DutyMember(name=m.get("name", ""), task=m.get("task", ""))
-                    for m in g.get("members", [])
+                    DutyMember(
+                        name=str(m.get("name", "") or ""),
+                        task=str(m.get("task", "") or ""),
+                    )
+                    for m in (g.get("members", []) or [])
                 ]
-                groups.append(DutyGroup(name=g.get("name", "未命名组"), members=members))
+                groups.append(DutyGroup(name=str(g.get("name", "") or "未命名组"), members=members))
             self.config.groups = groups
             self.api.config.save()
             self.dutyChanged.emit()

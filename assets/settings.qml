@@ -1,200 +1,178 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import RinUI
 
-ScrollView {
+FluentPage {
     id: root
-    clip: true
+
+    title: qsTr("值日生设置")
+
+    // 设置页导航跳转时会注入 pluginId
+    property string pluginId: ""
+    // 通过插件后端桥获取本插件后端
+    property var backend: pluginId ? PluginBackendBridge.get_backend(pluginId) : null
 
     property var groupsData: []
-    property string startDateText: "2025-09-01"
+    property string startDateText: ""
 
     function loadData() {
-        groupsData = backend.get_groups()
-        startDateText = backend.get_start_date()
-        rebuild()
+        if (!root.backend) return
+        root.groupsData = root.backend.get_groups()
+        root.startDateText = root.backend.get_start_date()
     }
 
-    ColumnLayout {
-        id: mainColumn
-        x: 16
-        width: root.width - 32
-        spacing: 12
+    onBackendChanged: loadData()
+    Component.onCompleted: Qt.callLater(loadData)
 
-        // 顶部占位
-        Item { Layout.preferredHeight: 12 }
+    // ---------------- 起始日期 ----------------
+    SettingCard {
+        Layout.fillWidth: true
+        icon.name: "ic_fluent_calendar_start_20_regular"
+        title: qsTr("轮换起始日期")
+        description: qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
 
-        // 标题
-        Text {
-            text: "值日生设置"
-            font.pixelSize: 18
-            font.bold: true
+        RowLayout {
+            spacing: 8
+
+            TextField {
+                id: startField
+                text: root.startDateText
+                placeholderText: "YYYY-MM-DD"
+                onTextChanged: root.startDateText = text
+            }
+
+            Button {
+                text: qsTr("设为今天")
+                onClicked: {
+                    var d = new Date()
+                    var m = String(d.getMonth() + 1).padStart(2, "0")
+                    var day = String(d.getDate()).padStart(2, "0")
+                    startField.text = d.getFullYear() + "-" + m + "-" + day
+                }
+            }
         }
+    }
 
-        // 起始日期
-        GroupBox {
-            title: "轮换起始日期"
+    // ---------------- 分组列表 ----------------
+    Repeater {
+        model: root.groupsData
+
+        delegate: Frame {
+            required property var modelData
+            required property int index
+
+            // 供内层成员 Repeater 引用（内层 modelData 会遮蔽外层）
+            property var group: modelData
+
             Layout.fillWidth: true
+            topPadding: 14
+            bottomPadding: 14
+            leftPadding: 16
+            rightPadding: 16
 
-            RowLayout {
-                width: parent.width
+            ColumnLayout {
+                anchors.fill: parent
                 spacing: 8
 
-                Text { text: "起始日期" }
-
-                TextField {
-                    id: startDateField
+                // 组名行
+                RowLayout {
                     Layout.fillWidth: true
-                    placeholderText: "YYYY-MM-DD"
-                    text: startDateText
-                    onTextChanged: startDateText = text
+                    spacing: 8
+
+                    Text {
+                        text: qsTr("第 %1 组").arg(index + 1)
+                        typography: Typography.BodyStrong
+                    }
+
+                    TextField {
+                        id: groupNameField
+                        Layout.preferredWidth: 160
+                        placeholderText: qsTr("组名")
+                        text: modelData.name || ""
+                        onTextChanged: modelData.name = text
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Button {
+                        text: qsTr("删除该组")
+                        onClicked: {
+                            root.groupsData.splice(index, 1)
+                            root.groupsData = root.groupsData.slice()
+                        }
+                    }
                 }
 
+                // 成员列表
+                Repeater {
+                    model: group.members
+
+                    delegate: RowLayout {
+                        required property var modelData
+                        required property int index
+
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        TextField {
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("姓名")
+                            text: modelData.name || ""
+                            onTextChanged: modelData.name = text
+                        }
+
+                        TextField {
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("任务，如：扫地")
+                            text: modelData.task || ""
+                            onTextChanged: modelData.task = text
+                        }
+
+                        Button {
+                            text: qsTr("删除")
+                            onClicked: {
+                                group.members.splice(index, 1)
+                                root.groupsData = root.groupsData.slice()
+                            }
+                        }
+                    }
+                }
+
+                // 添加成员
                 Button {
-                    text: "设为今天"
+                    text: qsTr("+ 添加成员")
                     onClicked: {
-                        var d = new Date()
-                        var m = String(d.getMonth() + 1).padStart(2, "0")
-                        var day = String(d.getDate()).padStart(2, "0")
-                        startDateField.text = d.getFullYear() + "-" + m + "-" + day
+                        group.members.push({ name: "", task: "" })
+                        root.groupsData = root.groupsData.slice()
                     }
                 }
             }
         }
-
-        // 分组列表容器
-        ColumnLayout {
-            id: groupsColumn
-            Layout.fillWidth: true
-            spacing: 10
-        }
-
-        // 添加分组
-        Button {
-            text: "+ 添加分组"
-            onClicked: {
-                groupsData.push({ name: "第" + (groupsData.length + 1) + "组", members: [] })
-                rebuild()
-            }
-        }
-
-        // 保存按钮
-        Button {
-            text: "保存设置"
-            Layout.fillWidth: true
-            highlighted: true
-            onClicked: {
-                backend.set_start_date(startDateField.text)
-                backend.save_groups(JSON.stringify(groupsData))
-            }
-        }
-
-        // 底部占位
-        Item { Layout.preferredHeight: 16 }
     }
 
-    function rebuild() {
-        // 清空分组容器
-        groupsColumn.children = []
-
-        for (var gi = 0; gi < groupsData.length; gi++) {
-            var group = groupsData[gi]
-
-            var gb = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Controls; GroupBox { Layout.fillWidth: true; }',
-                groupsColumn, "groupBox" + gi
-            )
-            gb.title = "分组 " + (gi + 1)
-
-            var col = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Layouts; ColumnLayout { width: parent.width; spacing: 6; }',
-                gb, "groupCol" + gi
-            )
-
-            // 组名
-            var nameRow = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Layouts; RowLayout { Layout.fillWidth: true; spacing: 6; }',
-                col, "nameRow" + gi
-            )
-            Qt.createQmlObject('import QtQuick; Text { text: "组名"; }', nameRow, "nameLabel" + gi)
-            var nameField = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Controls; TextField { Layout.fillWidth: true; }',
-                nameRow, "nameField" + gi
-            )
-            nameField.text = group.name || ""
-            nameField.textChanged.connect(function(newText) {
-                groupsData[gi].name = newText
+    // ---------------- 添加分组 ----------------
+    Button {
+        Layout.fillWidth: true
+        text: qsTr("+ 添加分组")
+        onClicked: {
+            root.groupsData.push({
+                name: qsTr("第%1组").arg(root.groupsData.length + 1),
+                members: []
             })
-            var delGroupBtn = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Controls; Button { text: "删除组"; }',
-                nameRow, "delGroupBtn" + gi
-            )
-            delGroupBtn.clicked.connect((function(idx) {
-                return function() {
-                    groupsData.splice(idx, 1)
-                    rebuild()
-                }
-            })(gi))
-
-            // 成员列表
-            var membersCol = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Layouts; ColumnLayout { Layout.fillWidth: true; spacing: 4; }',
-                col, "membersCol" + gi
-            )
-
-            for (var mi = 0; mi < group.members.length; mi++) {
-                addMemberRow(membersCol, gi, mi, group.members[mi])
-            }
-
-            // 添加成员
-            var addBtn = Qt.createQmlObject(
-                'import QtQuick; import QtQuick.Controls; Button { text: "+ 添加成员"; }',
-                col, "addBtn" + gi
-            )
-            addBtn.clicked.connect((function(idx) {
-                return function() {
-                    groupsData[idx].members.push({ name: "", task: "" })
-                    rebuild()
-                }
-            })(gi))
+            root.groupsData = root.groupsData.slice()
         }
     }
 
-    function addMemberRow(parent, gi, mi, member) {
-        var row = Qt.createQmlObject(
-            'import QtQuick; import QtQuick.Layouts; RowLayout { Layout.fillWidth: true; spacing: 4; }',
-            parent, "memberRow" + gi + "_" + mi
-        )
-
-        var nameField = Qt.createQmlObject(
-            'import QtQuick; import QtQuick.Controls; TextField { Layout.fillWidth: true; placeholderText: "姓名"; }',
-            row, "mName" + gi + "_" + mi
-        )
-        nameField.text = member.name || ""
-        nameField.textChanged.connect(function(newText) {
-            groupsData[gi].members[mi].name = newText
-        })
-
-        var taskField = Qt.createQmlObject(
-            'import QtQuick; import QtQuick.Controls; TextField { Layout.fillWidth: true; placeholderText: "任务（如扫地）"; }',
-            row, "mTask" + gi + "_" + mi
-        )
-        taskField.text = member.task || ""
-        taskField.textChanged.connect(function(newText) {
-            groupsData[gi].members[mi].task = newText
-        })
-
-        var delBtn = Qt.createQmlObject(
-            'import QtQuick; import QtQuick.Controls; Button { text: "删除"; }',
-            row, "mDel" + gi + "_" + mi
-        )
-        delBtn.clicked.connect((function(gidx, midx) {
-            return function() {
-                groupsData[gidx].members.splice(midx, 1)
-                rebuild()
-            }
-        })(gi, mi))
+    // ---------------- 保存 ----------------
+    Button {
+        Layout.fillWidth: true
+        text: qsTr("保存设置")
+        highlighted: true
+        onClicked: {
+            if (!root.backend) return
+            root.backend.set_start_date(root.startDateText)
+            root.backend.save_groups(root.groupsData)
+        }
     }
-
-    Component.onCompleted: loadData()
 }
