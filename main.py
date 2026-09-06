@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List
 
 from ClassWidgets.SDK import ConfigBaseModel, CW2Plugin, PluginAPI
@@ -43,8 +43,10 @@ class DutyConfig(ConfigBaseModel):
             ],
         ),
     ]
-    # 起始日期 (YYYY-MM-DD)，该周为第 1 周
+    # 起始日期 (YYYY-MM-DD)
     start_date: str = "2025-09-01"
+    # 轮换模式："weekly"=按周轮换，"daily"=每天轮换，"workday"=工作日轮换（周末仅算1日）
+    rotation_mode: str = "weekly"
     # 手动切换偏移量（相对自动计算结果的偏移）
     manual_offset: int = 0
 
@@ -98,6 +100,29 @@ class Plugin(CW2Plugin):
         except (ValueError, TypeError):
             return date.today()
 
+    def _count_workday_slots(self, start: date, today: date) -> int:
+        """工作日模式：计算从 start 到 today 的轮换步数。
+
+        规则：
+        - 周一至周五：每天算 1 步
+        - 周六：算 1 步（周末开始）
+        - 周日：算 0 步（与周六合并为 1 天）
+        即周末（周六+周日）仅算 1 日。
+        """
+        if today <= start:
+            return 0
+        slots = 0
+        cur = start
+        while cur < today:
+            cur += timedelta(days=1)
+            wd = cur.weekday()  # 0=周一 ... 5=周六, 6=周日
+            if wd <= 4:        # 周一至周五
+                slots += 1
+            elif wd == 5:      # 周六
+                slots += 1
+            # 周日：不额外计数（与周六合并）
+        return slots
+
     def _get_auto_index(self) -> int:
         """根据起始日期与今天计算自动轮换到的组索引"""
         groups = self.config.groups
@@ -105,9 +130,34 @@ class Plugin(CW2Plugin):
             return 0
         start = self._parse_date(self.config.start_date)
         today = date.today()
-        days = (today - start).days
-        weeks = max(0, days // 7)
-        return weeks % len(groups)
+        days = max(0, (today - start).days)
+
+        mode = self.config.rotation_mode
+        if mode == "daily":
+            # 每天轮换
+            return days % len(groups)
+        elif mode == "workday":
+            # 工作日轮换：周末仅算 1 日
+            slots = self._count_workday_slots(start, today)
+            return slots % len(groups)
+        else:
+            # 按周轮换（默认）：每周换一组
+            weeks = days // 7
+            return weeks % len(groups)
+
+    def _get_period_number(self) -> int:
+        """当前轮换周期序号，从 1 开始"""
+        start = self._parse_date(self.config.start_date)
+        today = date.today()
+        days = max(0, (today - start).days)
+
+        mode = self.config.rotation_mode
+        if mode == "daily":
+            return days + 1
+        elif mode == "workday":
+            return self._count_workday_slots(start, today) + 1
+        else:
+            return days // 7 + 1
 
     def _get_current_index(self) -> int:
         """当前实际显示的组索引（含手动偏移）"""
@@ -127,7 +177,8 @@ class Plugin(CW2Plugin):
         if not groups:
             return {
                 "groupName": "未配置",
-                "weekNumber": 0,
+                "periodNumber": 0,
+                "rotationMode": self.config.rotation_mode,
                 "autoIndex": 0,
                 "currentIndex": 0,
                 "totalGroups": 0,
@@ -140,12 +191,11 @@ class Plugin(CW2Plugin):
         auto_idx = self._get_auto_index()
         group = groups[idx]
         today = date.today()
-        start = self._parse_date(self.config.start_date)
-        weeks = max(0, (today - start).days // 7) + 1
 
         return {
             "groupName": group.name,
-            "weekNumber": weeks,
+            "periodNumber": self._get_period_number(),
+            "rotationMode": self.config.rotation_mode,
             "autoIndex": auto_idx,
             "currentIndex": idx,
             "totalGroups": len(groups),
@@ -171,17 +221,18 @@ class Plugin(CW2Plugin):
             for g in self.config.groups
         ]
 
-    @Slot(str, "QVariant")
-    def save_all(self, start_date: str, data: Any) -> None:
-        """一次性保存起始日期和分组配置（推荐使用）。
+    @Slot(str, str, "QVariant")
+    def save_all(self, start_date: str, rotation_mode: str, data: Any) -> None:
+        """一次性保存起始日期、轮换模式和分组配置。
 
         QML 端调用示例：
-            backend.save_all(startDateText, JSON.stringify(groupsData))
+            backend.save_all(startDateText, rotationMode, JSON.stringify(groupsData))
         """
         import json
         from loguru import logger
 
         try:
+            logger.info(f"[值日生] save_all 收到: mode={rotation_mode!r}, start={start_date!r}")
             # 解析分组数据
             if isinstance(data, (str, bytes, bytearray)):
                 data = json.loads(data)
@@ -212,12 +263,14 @@ class Plugin(CW2Plugin):
                     )
                 )
 
+            mode = rotation_mode if rotation_mode in ("weekly", "daily", "workday") else "weekly"
             self.config.start_date = str(start_date or "")
+            self.config.rotation_mode = mode
             self.config.groups = groups
             self.api.config.save()
             self.dutyChanged.emit()
             logger.info(
-                f"[值日生] 保存成功：{len(groups)} 组, 起始日期={self.config.start_date}"
+                f"[值日生] 保存成功：{len(groups)} 组, 模式={mode}, 起始日期={self.config.start_date}"
             )
         except Exception as e:
             logger.error(f"[值日生] 保存失败: {e}")
@@ -227,11 +280,22 @@ class Plugin(CW2Plugin):
     @Slot("QVariant")
     def save_groups(self, data: Any) -> None:
         """仅保存分组（兼容旧调用，建议改用 save_all）。"""
-        self.save_all(self.config.start_date, data)
+        self.save_all(self.config.start_date, self.config.rotation_mode, data)
 
     @Slot(result=str)
     def get_start_date(self) -> str:
         return self.config.start_date
+
+    @Slot(result=str)
+    def get_rotation_mode(self) -> str:
+        return self.config.rotation_mode
+
+    @Slot(str)
+    def set_rotation_mode(self, mode: str) -> None:
+        if mode in ("weekly", "daily", "workday"):
+            self.config.rotation_mode = mode
+            self.api.config.save()
+            self.dutyChanged.emit()
 
     @Slot(str)
     def set_start_date(self, date_str: str) -> None:

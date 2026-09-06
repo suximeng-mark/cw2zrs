@@ -89,7 +89,15 @@ Widget {
             }
 
             Text {
-                text: root.duty ? qsTr("第 %1 周").arg(root.duty.weekNumber) : ""
+                text: {
+                    if (!root.duty) return ""
+                    var n = root.duty.periodNumber
+                    if (root.duty.rotationMode === "daily")
+                        return qsTr("第 %1 天").arg(n)
+                    if (root.duty.rotationMode === "workday")
+                        return qsTr("第 %1 轮").arg(n)
+                    return qsTr("第 %1 周").arg(n)
+                }
                 font.pixelSize: 12
                 opacity: 0.6
             }

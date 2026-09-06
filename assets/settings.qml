@@ -2,19 +2,17 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import RinUI
+import ClassWidgets.Plugins
 
-FluentPage {
+PluginPage {
     id: root
 
     title: qsTr("值日生设置")
-
-    // 设置页导航跳转时会注入 pluginId
-    property string pluginId: ""
-    // 通过插件后端桥获取本插件后端
-    property var backend: pluginId ? PluginBackendBridge.get_backend(pluginId) : null
+    pluginId: "com.classwidgets.duty-student"
 
     property var groupsData: []
     property string startDateText: ""
+    property string rotationMode: "weekly"
 
     function loadData() {
         if (!root.backend) return
@@ -22,6 +20,7 @@ FluentPage {
         var raw = root.backend.get_groups()
         root.groupsData = JSON.parse(JSON.stringify(raw))
         root.startDateText = root.backend.get_start_date()
+        root.rotationMode = root.backend.get_rotation_mode()
     }
 
     onBackendChanged: loadData()
@@ -96,10 +95,39 @@ FluentPage {
         }
         try {
             var json = JSON.stringify(root.groupsData)
-            root.backend.save_all(root.startDateText, json)
-            console.log("[值日生] 保存指令已发送")
+            root.backend.save_all(root.startDateText, root.rotationMode, json)
         } catch (e) {
             console.error("[值日生] 保存失败: " + e)
+        }
+    }
+
+    // ---------------- 轮换模式 ----------------
+    SettingCard {
+        Layout.fillWidth: true
+        icon.name: "ic_fluent_arrow_sync_20_regular"
+        title: qsTr("轮换方式")
+        description: qsTr("按周：每周换一组；每天：每日换一组；工作日：周一至周五每天换，周末（六日）仅算 1 日")
+
+        RowLayout {
+            spacing: 12
+
+            RadioButton {
+                text: qsTr("按周轮换")
+                checked: root.rotationMode === "weekly"
+                onClicked: root.rotationMode = "weekly"
+            }
+
+            RadioButton {
+                text: qsTr("每天轮换")
+                checked: root.rotationMode === "daily"
+                onClicked: root.rotationMode = "daily"
+            }
+
+            RadioButton {
+                text: qsTr("工作日轮换")
+                checked: root.rotationMode === "workday"
+                onClicked: root.rotationMode = "workday"
+            }
         }
     }
 
@@ -108,7 +136,13 @@ FluentPage {
         Layout.fillWidth: true
         icon.name: "ic_fluent_calendar_start_20_regular"
         title: qsTr("轮换起始日期")
-        description: qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
+        description: {
+            if (root.rotationMode === "daily")
+                return qsTr("从该日期开始计为第 1 天，值日小组每天自动轮换")
+            if (root.rotationMode === "workday")
+                return qsTr("从该日期开始，周一至周五每天轮换，周末仅算 1 日")
+            return qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
+        }
 
         RowLayout {
             spacing: 8
@@ -166,8 +200,9 @@ FluentPage {
                     TextField {
                         Layout.preferredWidth: 160
                         placeholderText: qsTr("组名")
-                        text: group.name || ""
-                        onEditingFinished: group.name = text
+                        text: root.groupsData[index] ? root.groupsData[index].name : ""
+                        // 通过 root.groupsData 写入，确保修改的是被序列化的原始对象
+                        onTextChanged: if (root.groupsData[index]) root.groupsData[index].name = text
                     }
 
                     Item { Layout.fillWidth: true }
@@ -192,15 +227,23 @@ FluentPage {
                         TextField {
                             Layout.fillWidth: true
                             placeholderText: qsTr("姓名")
-                            text: modelData.name || ""
-                            onEditingFinished: modelData.name = text
+                            text: (root.groupsData[groupDelegate.index] && root.groupsData[groupDelegate.index].members[index])
+                                  ? root.groupsData[groupDelegate.index].members[index].name : ""
+                            onTextChanged: {
+                                var g = root.groupsData[groupDelegate.index]
+                                if (g && g.members[index]) g.members[index].name = text
+                            }
                         }
 
                         TextField {
                             Layout.fillWidth: true
                             placeholderText: qsTr("任务，如：扫地")
-                            text: modelData.task || ""
-                            onEditingFinished: modelData.task = text
+                            text: (root.groupsData[groupDelegate.index] && root.groupsData[groupDelegate.index].members[index])
+                                  ? root.groupsData[groupDelegate.index].members[index].task : ""
+                            onTextChanged: {
+                                var g = root.groupsData[groupDelegate.index]
+                                if (g && g.members[index]) g.members[index].task = text
+                            }
                         }
 
                         Button {
