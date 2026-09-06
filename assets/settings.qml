@@ -16,9 +16,7 @@ PluginPage {
 
     function loadData() {
         if (!root.backend) return
-        // backend 返回的是 QVariantList（只读），必须深拷贝为可变 JS 对象
-        var raw = root.backend.get_groups()
-        root.groupsData = JSON.parse(JSON.stringify(raw))
+        root.groupsData = JSON.parse(JSON.stringify(root.backend.get_groups()))
         root.startDateText = root.backend.get_start_date()
         root.rotationMode = root.backend.get_rotation_mode()
     }
@@ -26,82 +24,70 @@ PluginPage {
     onBackendChanged: loadData()
     Component.onCompleted: Qt.callLater(loadData)
 
-    // 添加成员：需要重新渲染列表，用不可变更新
+    function groupAt(gi) {
+        return root.groupsData[gi] || null
+    }
+    function memberAt(gi, mi) {
+        var g = root.groupsData[gi]
+        return (g && g.members && g.members[mi]) ? g.members[mi] : null
+    }
+
     function addMember(groupIndex) {
         var arr = root.groupsData.slice()
-        var g = arr[groupIndex]
-        g.members = g.members.concat([{ name: "", task: "" }])
+        arr[groupIndex].members = arr[groupIndex].members.concat([{ name: "", task: "" }])
         root.groupsData = arr
     }
 
-    // 删除成员
     function removeMember(groupIndex, memberIndex) {
         var arr = root.groupsData.slice()
-        var g = arr[groupIndex]
-        g.members = g.members.filter(function(_, i) { return i !== memberIndex })
+        arr[groupIndex].members = arr[groupIndex].members.filter(function(_, i) { return i !== memberIndex })
         root.groupsData = arr
     }
 
-    // 删除分组
     function removeGroup(groupIndex) {
         var arr = root.groupsData.slice()
         arr.splice(groupIndex, 1)
         root.groupsData = arr
     }
 
-    // 添加分组
     function addGroup() {
         var arr = root.groupsData.slice()
-        arr.push({
-            name: qsTr("第%1组").arg(arr.length + 1),
-            members: []
-        })
+        arr.push({ name: qsTr("第%1组").arg(arr.length + 1), members: [] })
         root.groupsData = arr
     }
 
-    // 批量导入
     function importMembers(groupIndex, text) {
-        var arr = root.groupsData.slice()
-        var g = arr[groupIndex]
+        var g = root.groupsData[groupIndex]
         if (!g) return 0
-        var lines = text.split(/\r?\n/)
         var added = 0
+        var lines = text.split(/\r?\n/)
         for (var i = 0; i < lines.length; i++) {
-            var line = lines[i].replace(/^\s+|\s+$/g, "")
-            if (line.length === 0) continue
-            var parts
-            if (/[，,]/.test(line)) {
-                parts = line.split(/[，,]/)
-            } else {
-                parts = line.split(/[\s\u3000]+/)
-            }
-            var name = (parts[0] || "").replace(/^\s+|\s+$/g, "")
-            var task = parts.length > 1 ? parts.slice(1).join(" ").replace(/^\s+|\s+$/g, "") : ""
-            if (name.length === 0) continue
+            var line = lines[i].trim()
+            if (!line) continue
+            var parts = /[，,]/.test(line) ? line.split(/[，,]/) : line.split(/[\s\u3000]+/)
+            var name = (parts[0] || "").trim()
+            if (!name) continue
+            var task = parts.length > 1 ? parts.slice(1).join(" ").trim() : ""
             g.members.push({ name: name, task: task })
             added++
         }
-        if (added > 0) {
-            root.groupsData = arr
-        }
+        if (added > 0) root.groupsData = root.groupsData.slice()
         return added
     }
 
-    // 保存全部：统一调用后端，避免多次 save 出错
     function doSave() {
-        if (!root.backend) {
-            console.warn("[值日生] backend 为空，无法保存")
-            return
-        }
+        if (!root.backend) return
         try {
-            var json = JSON.stringify(root.groupsData)
-            root.backend.save_all(root.startDateText, root.rotationMode, json)
+            root.backend.save_all(
+                root.startDateText,
+                root.rotationMode,
+                JSON.stringify(root.groupsData)
+            )
         } catch (e) {
             console.error("[值日生] 保存失败: " + e)
         }
     }
 
-    // ---------------- 轮换模式 ----------------
     SettingCard {
         Layout.fillWidth: true
         icon.name: "ic_fluent_arrow_sync_20_regular"
@@ -116,13 +102,11 @@ PluginPage {
                 checked: root.rotationMode === "weekly"
                 onClicked: root.rotationMode = "weekly"
             }
-
             RadioButton {
                 text: qsTr("每天轮换")
                 checked: root.rotationMode === "daily"
                 onClicked: root.rotationMode = "daily"
             }
-
             RadioButton {
                 text: qsTr("工作日轮换")
                 checked: root.rotationMode === "workday"
@@ -131,18 +115,15 @@ PluginPage {
         }
     }
 
-    // ---------------- 起始日期 ----------------
     SettingCard {
         Layout.fillWidth: true
         icon.name: "ic_fluent_calendar_start_20_regular"
         title: qsTr("轮换起始日期")
-        description: {
-            if (root.rotationMode === "daily")
-                return qsTr("从该日期开始计为第 1 天，值日小组每天自动轮换")
-            if (root.rotationMode === "workday")
-                return qsTr("从该日期开始，周一至周五每天轮换，周末仅算 1 日")
-            return qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
-        }
+        description: root.rotationMode === "daily"
+                     ? qsTr("从该日期开始计为第 1 天，值日小组每天自动轮换")
+                     : root.rotationMode === "workday"
+                       ? qsTr("从该日期开始，周一至周五每天轮换，周末仅算 1 日")
+                       : qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
 
         RowLayout {
             spacing: 8
@@ -166,7 +147,6 @@ PluginPage {
         }
     }
 
-    // ---------------- 分组列表 ----------------
     Repeater {
         model: root.groupsData
 
@@ -174,8 +154,6 @@ PluginPage {
             id: groupDelegate
             required property var modelData
             required property int index
-
-            property var group: modelData
 
             Layout.fillWidth: true
             topPadding: 14
@@ -187,38 +165,37 @@ PluginPage {
                 anchors.fill: parent
                 spacing: 8
 
-                // 组名行
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
 
                     Text {
-                        text: qsTr("第 %1 组").arg(index + 1)
+                        text: qsTr("第 %1 组").arg(groupDelegate.index + 1)
                         typography: Typography.BodyStrong
                     }
 
                     TextField {
                         Layout.preferredWidth: 160
                         placeholderText: qsTr("组名")
-                        text: root.groupsData[index] ? root.groupsData[index].name : ""
-                        // 通过 root.groupsData 写入，确保修改的是被序列化的原始对象
-                        onTextChanged: if (root.groupsData[index]) root.groupsData[index].name = text
+                        text: root.groupAt(groupDelegate.index) ? root.groupAt(groupDelegate.index).name : ""
+                        onTextChanged: {
+                            var g = root.groupAt(groupDelegate.index)
+                            if (g) g.name = text
+                        }
                     }
 
                     Item { Layout.fillWidth: true }
 
                     Button {
                         text: qsTr("删除该组")
-                        onClicked: root.removeGroup(index)
+                        onClicked: root.removeGroup(groupDelegate.index)
                     }
                 }
 
-                // 成员列表
                 Repeater {
-                    model: group.members
+                    model: groupDelegate.modelData.members
 
                     delegate: RowLayout {
-                        required property var modelData
                         required property int index
 
                         Layout.fillWidth: true
@@ -227,22 +204,26 @@ PluginPage {
                         TextField {
                             Layout.fillWidth: true
                             placeholderText: qsTr("姓名")
-                            text: (root.groupsData[groupDelegate.index] && root.groupsData[groupDelegate.index].members[index])
-                                  ? root.groupsData[groupDelegate.index].members[index].name : ""
+                            text: {
+                                var m = root.memberAt(groupDelegate.index, index)
+                                return m ? m.name : ""
+                            }
                             onTextChanged: {
-                                var g = root.groupsData[groupDelegate.index]
-                                if (g && g.members[index]) g.members[index].name = text
+                                var m = root.memberAt(groupDelegate.index, index)
+                                if (m) m.name = text
                             }
                         }
 
                         TextField {
                             Layout.fillWidth: true
                             placeholderText: qsTr("任务，如：扫地")
-                            text: (root.groupsData[groupDelegate.index] && root.groupsData[groupDelegate.index].members[index])
-                                  ? root.groupsData[groupDelegate.index].members[index].task : ""
+                            text: {
+                                var m = root.memberAt(groupDelegate.index, index)
+                                return m ? m.task : ""
+                            }
                             onTextChanged: {
-                                var g = root.groupsData[groupDelegate.index]
-                                if (g && g.members[index]) g.members[index].task = text
+                                var m = root.memberAt(groupDelegate.index, index)
+                                if (m) m.task = text
                             }
                         }
 
@@ -253,7 +234,6 @@ PluginPage {
                     }
                 }
 
-                // 添加成员 / 批量导入
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
@@ -271,7 +251,6 @@ PluginPage {
                     Item { Layout.fillWidth: true }
                 }
 
-                // 批量导入弹窗
                 Popup {
                     id: importPopup
                     parent: Overlay.overlay
@@ -336,14 +315,12 @@ PluginPage {
         }
     }
 
-    // ---------------- 添加分组 ----------------
     Button {
         Layout.fillWidth: true
         text: qsTr("+ 添加分组")
         onClicked: root.addGroup()
     }
 
-    // ---------------- 保存 ----------------
     Button {
         Layout.fillWidth: true
         text: qsTr("保存设置")

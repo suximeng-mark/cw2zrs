@@ -7,18 +7,14 @@ import ClassWidgets.Theme
 Widget {
     id: root
 
-    // Class Widgets 加载 widget 后会把插件后端注入到 backend 属性
     property var duty: null
     property int memberCount: 0
 
-    // 头部标题
     text: qsTr("今日值日生")
 
-    // 根据成员数量自适应高度
     height: miniMode ? 56 : (132 + memberCount * 28)
     implicitWidth: 250
 
-    // backend 在组件创建后才注入，需监听变化
     onBackendChanged: refresh()
     Component.onCompleted: Qt.callLater(refresh)
 
@@ -27,12 +23,24 @@ Widget {
         function onDutyChanged() { refresh() }
     }
 
-    // 头部右侧显示日期
+    function refresh() {
+        if (!root.backend) return
+        root.duty = root.backend.get_today_duty()
+        root.memberCount = (root.duty && root.duty.members) ? root.duty.members.length : 0
+    }
+
+    function periodText() {
+        if (!root.duty) return ""
+        var n = root.duty.periodNumber
+        if (root.duty.rotationMode === "daily") return qsTr("第 %1 天").arg(n)
+        if (root.duty.rotationMode === "workday") return qsTr("第 %1 轮").arg(n)
+        return qsTr("第 %1 周").arg(n)
+    }
+
     actions: Subtitle {
         text: root.duty ? root.duty.date : ""
     }
 
-    // 小型胶囊按钮组件
     component DutyPillButton: Rectangle {
         id: pill
         property string label: ""
@@ -61,12 +69,10 @@ Widget {
         }
     }
 
-    // 主体内容
     ColumnLayout {
         anchors.fill: parent
         spacing: 6
 
-        // 组名胶囊 + 周次
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -89,15 +95,7 @@ Widget {
             }
 
             Text {
-                text: {
-                    if (!root.duty) return ""
-                    var n = root.duty.periodNumber
-                    if (root.duty.rotationMode === "daily")
-                        return qsTr("第 %1 天").arg(n)
-                    if (root.duty.rotationMode === "workday")
-                        return qsTr("第 %1 轮").arg(n)
-                    return qsTr("第 %1 周").arg(n)
-                }
+                text: root.periodText()
                 font.pixelSize: 12
                 opacity: 0.6
             }
@@ -105,14 +103,12 @@ Widget {
             Item { Layout.fillWidth: true }
         }
 
-        // 成员列表（姓名 + 任务）
         Repeater {
             model: root.duty ? root.duty.members : []
 
             delegate: RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
-                // mini 模式下只显示第一位成员，避免溢出
                 visible: !root.miniMode || index === 0
 
                 Text {
@@ -137,7 +133,6 @@ Widget {
 
         Item { Layout.fillHeight: true }
 
-        // 手动切换按钮
         RowLayout {
             Layout.fillWidth: true
             spacing: 6
@@ -163,11 +158,5 @@ Widget {
                 onClicked: if (root.backend) root.backend.next_group()
             }
         }
-    }
-
-    function refresh() {
-        if (!root.backend) return
-        root.duty = root.backend.get_today_duty()
-        root.memberCount = (root.duty && root.duty.members) ? root.duty.members.length : 0
     }
 }
