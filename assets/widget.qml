@@ -8,11 +8,11 @@ Widget {
     id: root
 
     property var duty: null
-    property int memberCount: 0
+    property var rows: []
 
     text: qsTr("今日值日生")
 
-    height: miniMode ? 40 : (132 + memberCount * 28)
+    height: miniMode ? 40 : (132 + root.rows.length * 28)
     implicitWidth: miniMode ? 220 : 250
 
     onBackendChanged: refresh()
@@ -26,7 +26,38 @@ Widget {
     function refresh() {
         if (!root.backend) return
         root.duty = root.backend.get_today_duty()
-        root.memberCount = (root.duty && root.duty.members) ? root.duty.members.length : 0
+        root.rows = root.displayRows()
+    }
+
+    // 按岗位（task）把成员归并成行；无岗位的成员每人独占一行
+    function displayRows() {
+        if (!root.duty || !root.duty.members) return []
+        var out = []
+        var taskIndex = ({})
+        var ms = root.duty.members
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]
+            var nm = (m.name && m.name.length > 0) ? m.name : qsTr("（未命名）")
+            if (m.status === "absent") nm += qsTr("（假）")
+            if (m.task) {
+                if (taskIndex[m.task] === undefined) {
+                    taskIndex[m.task] = out.length
+                    out.push({ task: m.task, names: [nm] })
+                } else {
+                    out[taskIndex[m.task]].names.push(nm)
+                }
+            } else {
+                out.push({ task: "", names: [nm] })
+            }
+        }
+        return out
+    }
+
+    function hasAbsent() {
+        if (!root.duty || !root.duty.members) return false
+        for (var i = 0; i < root.duty.members.length; i++)
+            if (root.duty.members[i].status === "absent") return true
+        return false
     }
 
     function periodText() {
@@ -120,6 +151,22 @@ Widget {
                 color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
             }
 
+            Rectangle {
+                visible: root.hasAbsent()
+                Layout.preferredHeight: 14
+                Layout.preferredWidth: absentMiniText.implicitWidth + 10
+                radius: 7
+                color: "#E5A100"
+
+                Text {
+                    id: absentMiniText
+                    anchors.centerIn: parent
+                    text: qsTr("假")
+                    color: "#FFFFFF"
+                    font.pixelSize: 9
+                }
+            }
+
             Text {
                 text: root.periodText()
                 font.pixelSize: 10
@@ -162,11 +209,48 @@ Widget {
                 opacity: 0.6
             }
 
+            Rectangle {
+                visible: root.duty && root.duty.isHoliday
+                Layout.preferredHeight: 18
+                Layout.preferredWidth: holidayBadgeText.implicitWidth + 14
+                radius: 9
+                color: "#E5A100"
+
+                Text {
+                    id: holidayBadgeText
+                    anchors.centerIn: parent
+                    text: root.duty && root.duty.holidayName
+                          ? root.duty.holidayName : qsTr("假期中")
+                    color: "#FFFFFF"
+                    font.pixelSize: 10
+                }
+            }
+
+            Rectangle {
+                visible: root.duty && root.duty.switched
+                Layout.preferredHeight: 18
+                Layout.preferredWidth: switchedBadgeText.implicitWidth + 14
+                radius: 9
+                color: "transparent"
+                border.width: 1
+                border.color: Theme.isDark() ? Qt.alpha("#FFFFFF", 0.4) : Qt.alpha("#000000", 0.3)
+
+                Text {
+                    id: switchedBadgeText
+                    anchors.centerIn: parent
+                    text: qsTr("已调换")
+                    font.pixelSize: 10
+                    color: Theme.isDark()
+                           ? Qt.alpha("#FFFFFF", 0.7)
+                           : Qt.alpha("#000000", 0.6)
+                }
+            }
+
             Item { Layout.fillWidth: true }
         }
 
         Repeater {
-            model: root.duty ? root.duty.members : []
+            model: root.rows
 
             delegate: RowLayout {
                 Layout.fillWidth: true
@@ -174,19 +258,20 @@ Widget {
                 visible: !root.miniMode
 
                 Text {
-                    text: (modelData.name && modelData.name.length > 0)
-                          ? modelData.name : qsTr("（未命名）")
-                    font.pixelSize: 15
+                    visible: modelData.task !== ""
+                    text: modelData.task ? modelData.task + "：" : ""
+                    font.pixelSize: 14
                     font.weight: Font.DemiBold
-                    color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                    color: Colors.proxy.primaryColor
                 }
 
                 Text {
-                    text: modelData.task ? "· " + modelData.task : ""
-                    font.pixelSize: 13
-                    color: Theme.isDark()
-                           ? Qt.alpha("#FFFFFF", 0.6)
-                           : Qt.alpha("#000000", 0.55)
+                    text: modelData.names.join("、")
+                    font.pixelSize: modelData.task !== "" ? 14 : 15
+                    font.weight: modelData.task !== "" ? Font.Normal : Font.DemiBold
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
                 }
 
                 Item { Layout.fillWidth: true }
