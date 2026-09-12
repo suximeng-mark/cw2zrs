@@ -9,11 +9,47 @@ Widget {
 
     property var duty: null
     property var rows: []
+    property real miniMaxWidth: 360
 
     text: qsTr("今日值日生")
 
-    height: miniMode ? 40 : (132 + root.rows.length * 28)
-    implicitWidth: miniMode ? 220 : 250
+    height: miniMode ? 62 : (132 + root.rows.length * 28)
+    implicitWidth: miniMode ? root.miniWidth() : 250
+
+    // 紧凑模式两行布局的宽度度量
+    TextMetrics {
+        id: tmMiniGroup
+        font.pixelSize: 10
+        font.weight: Font.DemiBold
+        text: root.duty ? root.duty.groupName : ""
+    }
+    TextMetrics {
+        id: tmMiniPeriod
+        font.pixelSize: 10
+        text: root.periodText()
+    }
+    TextMetrics {
+        id: tmMiniHoliday
+        font.pixelSize: 9
+        text: (root.duty && root.duty.holidayName) ? root.duty.holidayName : qsTr("假期中")
+    }
+    TextMetrics {
+        id: tmMiniMembers
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+        text: root.membersInlineText()
+    }
+
+    function miniWidth() {
+        // 第一行：组名胶囊(+14) + 间距6 + 周期 +（间距6 + 假期徽标(+10)）
+        var top = tmMiniGroup.width + 14 + 6 + tmMiniPeriod.width
+        if (root.duty && root.duty.isHoliday)
+            top += 6 + tmMiniHoliday.width + 10
+        // 第二行：全部成员名
+        var content = Math.max(top, tmMiniMembers.width)
+        // +48 与基件 Widget 的内容边距算法保持一致
+        return Math.max(150, Math.min(root.miniMaxWidth, content + 48))
+    }
 
     onBackendChanged: refresh()
     Component.onCompleted: Qt.callLater(refresh)
@@ -53,13 +89,6 @@ Widget {
         return out
     }
 
-    function hasAbsent() {
-        if (!root.duty || !root.duty.members) return false
-        for (var i = 0; i < root.duty.members.length; i++)
-            if (root.duty.members[i].status === "absent") return true
-        return false
-    }
-
     function periodText() {
         if (!root.duty) return ""
         var n = root.duty.periodNumber
@@ -72,14 +101,13 @@ Widget {
         if (!root.duty || !root.duty.members || root.duty.members.length === 0)
             return qsTr("（无值日生）")
         var names = []
-        var max = Math.min(root.duty.members.length, 3)
-        for (var i = 0; i < max; i++) {
+        for (var i = 0; i < root.duty.members.length; i++) {
             var n = root.duty.members[i].name
-            names.push((n && n.length > 0) ? n : qsTr("未命名"))
+            var s = (n && n.length > 0) ? n : qsTr("未命名")
+            if (root.duty.members[i].status === "absent") s += qsTr("（假）")
+            names.push(s)
         }
-        var s = names.join("、")
-        if (root.duty.members.length > 3) s += "…"
-        return s
+        return names.join("、")
     }
 
     actions: Subtitle {
@@ -119,59 +147,69 @@ Widget {
         anchors.fill: parent
         spacing: 6
 
-        // ===== 紧凑模式：单行显示 =====
-        RowLayout {
+        // ===== 紧凑模式：两行显示，宽度随内容变化 =====
+        ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 6
+            spacing: 4
             visible: root.miniMode
 
-            Rectangle {
-                Layout.preferredHeight: 18
-                Layout.preferredWidth: miniGroupText.implicitWidth + 14
-                radius: 9
-                color: Colors.proxy.primaryColor
+            // 第一行：组名胶囊 + 周期 + 假期徽标
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Rectangle {
+                    Layout.preferredHeight: 18
+                    Layout.preferredWidth: miniGroupText.implicitWidth + 14
+                    radius: 9
+                    color: Colors.proxy.primaryColor
+
+                    Text {
+                        id: miniGroupText
+                        anchors.centerIn: parent
+                        text: root.duty ? root.duty.groupName : "—"
+                        color: "#FFFFFF"
+                        font.pixelSize: 10
+                        font.weight: Font.DemiBold
+                    }
+                }
 
                 Text {
-                    id: miniGroupText
-                    anchors.centerIn: parent
-                    text: root.duty ? root.duty.groupName : "—"
-                    color: "#FFFFFF"
+                    text: root.periodText()
                     font.pixelSize: 10
-                    font.weight: Font.DemiBold
+                    opacity: 0.55
+                    visible: root.duty
                 }
+
+                Rectangle {
+                    visible: root.duty && root.duty.isHoliday
+                    Layout.preferredHeight: 14
+                    Layout.preferredWidth: miniHolidayText.implicitWidth + 10
+                    radius: 7
+                    color: "#E5A100"
+
+                    Text {
+                        id: miniHolidayText
+                        anchors.centerIn: parent
+                        text: (root.duty && root.duty.holidayName)
+                              ? root.duty.holidayName : qsTr("假期中")
+                        color: "#FFFFFF"
+                        font.pixelSize: 9
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
             }
 
+            // 第二行：全部成员姓名（宽度可变，超长时在部件最大宽度内省略）
             Text {
-                Layout.fillWidth: true
                 text: root.membersInlineText()
                 font.pixelSize: 13
                 font.weight: Font.DemiBold
-                elide: Text.ElideRight
                 color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
-            }
-
-            Rectangle {
-                visible: root.hasAbsent()
-                Layout.preferredHeight: 14
-                Layout.preferredWidth: absentMiniText.implicitWidth + 10
-                radius: 7
-                color: "#E5A100"
-
-                Text {
-                    id: absentMiniText
-                    anchors.centerIn: parent
-                    text: qsTr("假")
-                    color: "#FFFFFF"
-                    font.pixelSize: 9
-                }
-            }
-
-            Text {
-                text: root.periodText()
-                font.pixelSize: 10
-                opacity: 0.55
-                visible: root.duty
+                elide: Text.ElideRight
+                Layout.maximumWidth: root.miniMaxWidth - 48
             }
         }
 
