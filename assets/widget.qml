@@ -13,10 +13,10 @@ Widget {
 
     text: qsTr("今日值日生")
 
-    height: miniMode ? 62 : (132 + root.rows.length * 28)
+    height: miniMode ? 82 : (132 + root.rows.length * 28)
     implicitWidth: miniMode ? root.miniWidth() : 250
 
-    // 紧凑模式两行布局的宽度度量
+    // 紧凑模式三行布局的宽度度量
     TextMetrics {
         id: tmMiniGroup
         font.pixelSize: 10
@@ -39,14 +39,19 @@ Widget {
         font.weight: Font.DemiBold
         text: root.membersInlineText()
     }
+    TextMetrics {
+        id: tmMiniTasks
+        font.pixelSize: 12
+        text: root.tasksInlineText()
+    }
 
     function miniWidth() {
         // 第一行：组名胶囊(+14) + 间距6 + 周期 +（间距6 + 假期徽标(+10)）
         var top = tmMiniGroup.width + 14 + 6 + tmMiniPeriod.width
         if (root.duty && root.duty.isHoliday)
             top += 6 + tmMiniHoliday.width + 10
-        // 第二行：全部成员名
-        var content = Math.max(top, tmMiniMembers.width)
+        // 第二行：全部成员名，第三行：全部任务名
+        var content = Math.max(top, tmMiniMembers.width, tmMiniTasks.width)
         // +48 与基件 Widget 的内容边距算法保持一致
         return Math.max(150, Math.min(root.miniMaxWidth, content + 48))
     }
@@ -108,6 +113,19 @@ Widget {
             names.push(s)
         }
         return names.join("、")
+    }
+
+    function tasksInlineText() {
+        if (!root.duty || !root.duty.members || root.duty.members.length === 0)
+            return ""
+        var tasks = []
+        for (var i = 0; i < root.duty.members.length; i++) {
+            var t = root.duty.members[i].task
+            var s = (t && t.length > 0) ? t : "—"
+            if (root.duty.members[i].status === "absent") s += qsTr("（假）")
+            tasks.push(s)
+        }
+        return tasks.join("、")
     }
 
     actions: Subtitle {
@@ -208,6 +226,17 @@ Widget {
                 font.pixelSize: 13
                 font.weight: Font.DemiBold
                 color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                elide: Text.ElideRight
+                Layout.maximumWidth: root.miniMaxWidth - 48
+            }
+
+            // 第三行：全部成员任务（与第二行按位置一一对应）
+            Text {
+                text: root.tasksInlineText()
+                font.pixelSize: 12
+                color: Theme.isDark()
+                       ? Qt.alpha("#FFFFFF", 0.6)
+                       : Qt.alpha("#000000", 0.55)
                 elide: Text.ElideRight
                 Layout.maximumWidth: root.miniMaxWidth - 48
             }
