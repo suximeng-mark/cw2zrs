@@ -8,7 +8,7 @@ PluginPage {
     id: root
 
     title: qsTr("值日生设置")
-    pluginId: "com.classwidgets.duty-student"
+    pluginId: "com.studentondutyshow.com"
 
     property var groupsData: []
     property string startDateText: ""

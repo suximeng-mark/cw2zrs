@@ -61,7 +61,7 @@ class Plugin(CW2Plugin):
         self.api.config.register_plugin_model(self.pid, self.config)
 
         self.api.widgets.register(
-            widget_id="com.classwidgets.duty-student.widget",
+            widget_id="com.studentondutyshow.com.widget",
             name="今日值日生",
             qml_path="assets/widget.qml",
             backend_obj=self,
