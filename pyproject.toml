@@ -1,9 +1,9 @@
 [project]
 name = "com-classwidgets-duty-student"
 version = "1.0.0"
-description = "Class Widgets 2 值日生显示插件"
+description = "Class Widgets 2 值日生插件，支持自定义分组、按周/每天/工作日轮换"
 authors = [
-    {name = ""},
+    {name = "zrs"},
 ]
 readme = "README.md"
 requires-python = ">=3.9"
@@ -12,3 +12,6 @@ dependencies = ["class-widgets-sdk>=0.4.2"]
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []

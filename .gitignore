@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+.idea/
+.vscode/
+lib/
+dist/
+build/
+*.egg-info/
+*.cwplugin
+*.zip
+RinUI/
+.trae/
+fix_cw_config.py

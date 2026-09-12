@@ -12,8 +12,8 @@ Widget {
 
     text: qsTr("今日值日生")
 
-    height: miniMode ? 56 : (132 + memberCount * 28)
-    implicitWidth: 250
+    height: miniMode ? 40 : (132 + memberCount * 28)
+    implicitWidth: miniMode ? 220 : 250
 
     onBackendChanged: refresh()
     Component.onCompleted: Qt.callLater(refresh)
@@ -37,8 +37,23 @@ Widget {
         return qsTr("第 %1 周").arg(n)
     }
 
+    function membersInlineText() {
+        if (!root.duty || !root.duty.members || root.duty.members.length === 0)
+            return qsTr("（无值日生）")
+        var names = []
+        var max = Math.min(root.duty.members.length, 3)
+        for (var i = 0; i < max; i++) {
+            var n = root.duty.members[i].name
+            names.push((n && n.length > 0) ? n : qsTr("未命名"))
+        }
+        var s = names.join("、")
+        if (root.duty.members.length > 3) s += "…"
+        return s
+    }
+
     actions: Subtitle {
         text: root.duty ? root.duty.date : ""
+        visible: !root.miniMode
     }
 
     component DutyPillButton: Rectangle {
@@ -73,6 +88,53 @@ Widget {
         anchors.fill: parent
         spacing: 6
 
+        // ===== 紧凑模式：单行显示 =====
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 6
+            visible: root.miniMode
+
+            Rectangle {
+                Layout.preferredHeight: 18
+                Layout.preferredWidth: miniGroupText.implicitWidth + 14
+                radius: 9
+                color: Colors.proxy.primaryColor
+
+                Text {
+                    id: miniGroupText
+                    anchors.centerIn: parent
+                    text: root.duty ? root.duty.groupName : "—"
+                    color: "#FFFFFF"
+                    font.pixelSize: 10
+                    font.weight: Font.DemiBold
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: root.membersInlineText()
+                font.pixelSize: 13
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+                color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+            }
+
+            Text {
+                text: root.periodText()
+                font.pixelSize: 10
+                opacity: 0.55
+                visible: root.duty
+            }
+        }
+
+        // 点击紧凑模式切换下一组
+        TapHandler {
+            enabled: root.miniMode && root.backend
+            onTapped: if (root.backend) root.backend.next_group()
+        }
+
+        // ===== 普通模式：完整展开 =====
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
@@ -109,12 +171,12 @@ Widget {
             delegate: RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
-                visible: !root.miniMode || index === 0
+                visible: !root.miniMode
 
                 Text {
                     text: (modelData.name && modelData.name.length > 0)
                           ? modelData.name : qsTr("（未命名）")
-                    font.pixelSize: root.miniMode ? 13 : 15
+                    font.pixelSize: 15
                     font.weight: Font.DemiBold
                     color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
                 }
@@ -131,7 +193,7 @@ Widget {
             }
         }
 
-        Item { Layout.fillHeight: true }
+        Item { Layout.fillHeight: true; visible: !root.miniMode }
 
         RowLayout {
             Layout.fillWidth: true

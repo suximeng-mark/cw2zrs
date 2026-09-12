@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List
 
 from ClassWidgets.SDK import ConfigBaseModel, CW2Plugin, PluginAPI
-from PySide6.QtCore import Signal, Slot
+from PySide6.QtCore import QTimer, Signal, Slot
 
 MODE_WEEKLY = "weekly"
 MODE_DAILY = "daily"
@@ -108,7 +108,7 @@ class Plugin(CW2Plugin):
 
     def _persist(self) -> None:
         self.api.config.save()
-        self.dutyChanged.emit()
+        QTimer.singleShot(0, self.dutyChanged.emit)
 
     @Slot(result="QVariant")
     def get_today_duty(self) -> Dict[str, Any]:
@@ -161,8 +161,16 @@ class Plugin(CW2Plugin):
         try:
             if isinstance(data, (str, bytes, bytearray)):
                 data = json.loads(data)
-            elif not isinstance(data, list):
-                data = json.loads(json.dumps(data, default=lambda o: dict(o)))
+            else:
+                def _to_serializable(o):
+                    if isinstance(o, dict):
+                        return {k: _to_serializable(v) for k, v in o.items()}
+                    if isinstance(o, (list, tuple)):
+                        return [_to_serializable(i) for i in o]
+                    if hasattr(o, "__dict__"):
+                        return _to_serializable(vars(o))
+                    return str(o)
+                data = json.loads(json.dumps(data, default=_to_serializable))
 
             if not isinstance(data, list):
                 raise ValueError(f"groups data must be a list, got {type(data)}")
@@ -186,11 +194,11 @@ class Plugin(CW2Plugin):
             self.config.start_date = str(start_date or "")
             self.config.rotation_mode = rotation_mode if rotation_mode in VALID_MODES else MODE_WEEKLY
             self.config.groups = groups
-            self._persist()
             logger.info(
                 f"[值日生] 保存成功：{len(groups)} 组, 模式={self.config.rotation_mode}, "
                 f"起始日期={self.config.start_date}"
             )
+            self._persist()
         except Exception as e:
             logger.error(f"[值日生] 保存失败: {e}")
             import traceback
