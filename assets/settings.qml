@@ -978,6 +978,61 @@ PluginPage {
         }
     }
 
+    SettingCard {
+        Layout.fillWidth: true
+        icon.name: "ic_fluent_table_20_regular"
+        title: qsTr("值日表导出")
+        description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记），同时导出 CSV（Excel 可编辑）和 HTML（浏览器打开可打印/存 PDF）到桌面")
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: qsTr("未来 2 周")
+                    onClicked: {
+                        var r = root.backend.export_schedule(2)
+                        scheduleResultText.text = r.msg
+                        scheduleResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                    }
+                }
+
+                Button {
+                    text: qsTr("未来 4 周")
+                    highlighted: true
+                    onClicked: {
+                        var r = root.backend.export_schedule(4)
+                        scheduleResultText.text = r.msg
+                        scheduleResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                    }
+                }
+
+                Button {
+                    text: qsTr("未来 8 周")
+                    onClicked: {
+                        var r = root.backend.export_schedule(8)
+                        scheduleResultText.text = r.msg
+                        scheduleResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+            }
+
+            Text {
+                id: scheduleResultText
+                Layout.fillWidth: true
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+            }
+        }
+    }
+
     Button {
         Layout.fillWidth: true
         text: qsTr("保存设置")

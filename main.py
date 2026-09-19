@@ -855,3 +855,186 @@ class Plugin(CW2Plugin):
         except Exception as e:
             logger.error(f"[值日生] 导入失败: {e}")
             return {"ok": False, "msg": str(e)}
+
+    # ----------------------------------------------------- schedule export
+    WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    MODE_LABELS = {
+        MODE_WEEKLY: "按周轮换",
+        MODE_DAILY: "每天轮换",
+        MODE_WORKDAY: "工作日轮换",
+    }
+    SCHEDULE_MAX_WEEKS = 26
+
+    def _desktop_dir(self) -> Path:
+        """导出目录：优先系统桌面，取不到时回退用户主目录。"""
+        try:
+            from PySide6.QtCore import QStandardPaths
+
+            location = QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.DesktopLocation
+            )
+            if location:
+                return Path(location)
+        except Exception:
+            pass
+        return Path.home()
+
+    def _build_schedule_rows(
+        self, start_day: date, weeks: int
+    ) -> List[Dict[str, str]]:
+        """逐日生成排班行，轮换结果与 widget 完全一致（含手动换组偏移）。"""
+        groups = self.config.groups
+        offset = self.config.manual_offset
+        rows: List[Dict[str, str]] = []
+        for k in range(weeks * 7):
+            day = start_day + timedelta(days=k)
+            slots = self._elapsed_slots(day)
+            idx = (slots + offset) % len(groups)
+            group = groups[idx]
+
+            labels: List[str] = []
+            for m in group.members:
+                nm = m.name or "（未命名）"
+                labels.append(f"{nm}（{m.task}）" if m.task else nm)
+            members_text = "、".join(labels) if labels else "（无成员）"
+
+            if self._is_holiday(day):
+                note = f"假期：{self._holiday_name(day) or '假期'}"
+            elif day.weekday() >= 5:
+                note = "周末"
+            else:
+                note = ""
+
+            rows.append({
+                "date": day.isoformat(),
+                "weekday": self.WEEKDAY_CN[day.weekday()],
+                "group": group.name,
+                "members": members_text,
+                "note": note,
+            })
+        return rows
+
+    @staticmethod
+    def _write_schedule_csv(path: Path, rows: List[Dict[str, str]]) -> None:
+        import csv
+
+        # utf-8-sig：Excel/WPS 直接打开中文不乱码
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["日期", "星期", "值日组", "成员（任务）", "备注"])
+            for r in rows:
+                writer.writerow(
+                    [r["date"], r["weekday"], r["group"], r["members"], r["note"]]
+                )
+
+    def _write_schedule_html(
+        self,
+        path: Path,
+        rows: List[Dict[str, str]],
+        start_day: date,
+        end_day: date,
+        weeks: int,
+    ) -> None:
+        import html
+
+        def esc(v: str) -> str:
+            return html.escape(v or "", quote=True)
+
+        body_rows = []
+        for r in rows:
+            if r["note"].startswith("假期"):
+                cls = "holiday"
+            elif r["note"] == "周末":
+                cls = "weekend"
+            else:
+                cls = "workday"
+            body_rows.append(
+                f'<tr class="{cls}">'
+                f"<td>{esc(r['date'])}</td>"
+                f"<td>{esc(r['weekday'])}</td>"
+                f"<td>{esc(r['group'])}</td>"
+                f"<td>{esc(r['members'])}</td>"
+                f"<td>{esc(r['note'])}</td></tr>"
+            )
+
+        mode_label = self.MODE_LABELS.get(self.config.rotation_mode, "")
+        generated = datetime.now().strftime("%Y-%m-%d %H:%M")
+        doc = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>班级值日表 {esc(start_day.isoformat())} 起 {weeks} 周</title>
+<style>
+@page {{ size: A4; margin: 14mm; }}
+* {{ box-sizing: border-box; }}
+body {{
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    margin: 24px; color: #1B1B1F;
+}}
+h1 {{ font-size: 22px; margin: 0 0 6px; }}
+.meta {{ font-size: 12px; color: #666; margin-bottom: 14px; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+th, td {{ border: 1px solid #C5C6CE; padding: 6px 8px; text-align: left; vertical-align: top; }}
+th {{ background: #EEF3FF; font-weight: 600; white-space: nowrap; }}
+td:nth-child(1), td:nth-child(2), td:nth-child(5) {{ white-space: nowrap; }}
+tr.holiday td {{ background: #FFF5DC; }}
+tr.weekend td {{ background: #F4F4F7; color: #777; }}
+@media print {{
+    body {{ margin: 0; }}
+    tr {{ page-break-inside: avoid; }}
+}}
+</style>
+</head>
+<body>
+<h1>班级值日表</h1>
+<div class="meta">
+日期范围：{esc(start_day.isoformat())} ~ {esc(end_day.isoformat())}（共 {weeks} 周）
+｜{esc(mode_label)}｜生成时间：{esc(generated)}
+</div>
+<table>
+<thead><tr><th>日期</th><th>星期</th><th>值日组</th><th>成员（任务）</th><th>备注</th></tr></thead>
+<tbody>
+{os.linesep.join(body_rows)}
+</tbody>
+</table>
+</body>
+</html>
+"""
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(doc)
+
+    @Slot(int, result="QVariant")
+    def export_schedule(self, weeks: int) -> Dict[str, Any]:
+        """导出未来 N 周值日表（CSV + HTML）到桌面。"""
+        from loguru import logger
+
+        try:
+            weeks = int(weeks)
+        except (ValueError, TypeError):
+            return {"ok": False, "msg": "周数无效"}
+        weeks = max(1, min(self.SCHEDULE_MAX_WEEKS, weeks))
+
+        if not self.config.groups:
+            return {"ok": False, "msg": "请先创建值日小组"}
+
+        try:
+            start_day = date.today()
+            end_day = start_day + timedelta(days=weeks * 7 - 1)
+            rows = self._build_schedule_rows(start_day, weeks)
+
+            base = f"值日表_{start_day.isoformat()}起_{weeks}周"
+            out_dir = self._desktop_dir()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = out_dir / f"{base}.csv"
+            html_path = out_dir / f"{base}.html"
+            self._write_schedule_csv(csv_path, rows)
+            self._write_schedule_html(html_path, rows, start_day, end_day, weeks)
+
+            logger.info(f"[值日生] 值日表已导出：{csv_path.name}, {html_path.name}")
+            return {
+                "ok": True,
+                "msg": f"已导出到：{out_dir}\n{csv_path.name}\n{html_path.name}",
+            }
+        except Exception as e:
+            logger.error(f"[值日生] 值日表导出失败: {e}")
+            return {"ok": False, "msg": str(e)}
