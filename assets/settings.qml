@@ -17,12 +17,39 @@ PluginPage {
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": []}
 
+    // 显示设置
+    property int fontGroup: 12
+    property int fontMeta: 12
+    property int fontName: 14
+    property int fontTask: 14
+    property string memberLayout: "task"
+
+    function loadDisplayData() {
+        if (!root.backend) return
+        var d = root.backend.get_display_settings()
+        if (!d) return
+        root.fontGroup = d.fontGroup
+        root.fontMeta = d.fontMeta
+        root.fontName = d.fontName
+        root.fontTask = d.fontTask
+        root.memberLayout = d.memberLayout
+    }
+
+    function pushDisplaySettings() {
+        if (!root.backend) return
+        root.backend.save_display_settings(
+            root.fontGroup, root.fontMeta, root.fontName, root.fontTask,
+            root.memberLayout
+        )
+    }
+
     function loadData() {
         if (!root.backend) return
         root.groupsData = JSON.parse(JSON.stringify(root.backend.get_groups()))
         root.startDateText = root.backend.get_start_date()
         root.rotationMode = root.backend.get_rotation_mode()
         root.holidaysData = JSON.parse(JSON.stringify(root.backend.get_holidays()))
+        root.loadDisplayData()
         root.refreshTodayStats()
     }
 
@@ -195,6 +222,156 @@ PluginPage {
                     var m = String(d.getMonth() + 1).padStart(2, "0")
                     var day = String(d.getDate()).padStart(2, "0")
                     startField.text = d.getFullYear() + "-" + m + "-" + day
+                }
+            }
+        }
+    }
+
+    SettingCard {
+        Layout.fillWidth: true
+        icon.name: "ic_fluent_text_font_size_20_regular"
+        title: qsTr("显示设置")
+        description: qsTr("四个区域字号独立调节（9~28px），拖动即时预览；排列方式控制普通模式下成员的密度")
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 10
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 3
+                columnSpacing: 10
+                rowSpacing: 2
+
+                Text {
+                    text: qsTr("组名")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 72
+                }
+                Slider {
+                    Layout.fillWidth: true
+                    from: 9
+                    to: 28
+                    stepSize: 1
+                    value: root.fontGroup
+                    onMoved: {
+                        root.fontGroup = Math.round(value)
+                        root.pushDisplaySettings()
+                    }
+                }
+                Text {
+                    text: root.fontGroup + " px"
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 44
+                    horizontalAlignment: Text.AlignRight
+                }
+
+                Text {
+                    text: qsTr("周期/徽标")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 72
+                }
+                Slider {
+                    Layout.fillWidth: true
+                    from: 9
+                    to: 28
+                    stepSize: 1
+                    value: root.fontMeta
+                    onMoved: {
+                        root.fontMeta = Math.round(value)
+                        root.pushDisplaySettings()
+                    }
+                }
+                Text {
+                    text: root.fontMeta + " px"
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 44
+                    horizontalAlignment: Text.AlignRight
+                }
+
+                Text {
+                    text: qsTr("成员姓名")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 72
+                }
+                Slider {
+                    Layout.fillWidth: true
+                    from: 9
+                    to: 28
+                    stepSize: 1
+                    value: root.fontName
+                    onMoved: {
+                        root.fontName = Math.round(value)
+                        root.pushDisplaySettings()
+                    }
+                }
+                Text {
+                    text: root.fontName + " px"
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 44
+                    horizontalAlignment: Text.AlignRight
+                }
+
+                Text {
+                    text: qsTr("任务")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 72
+                }
+                Slider {
+                    Layout.fillWidth: true
+                    from: 9
+                    to: 28
+                    stepSize: 1
+                    value: root.fontTask
+                    onMoved: {
+                        root.fontTask = Math.round(value)
+                        root.pushDisplaySettings()
+                    }
+                }
+                Text {
+                    text: root.fontTask + " px"
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 44
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                Label {
+                    text: qsTr("成员排列")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                }
+                RadioButton {
+                    text: qsTr("合并一行")
+                    checked: root.memberLayout === "inline"
+                    onClicked: {
+                        root.memberLayout = "inline"
+                        root.pushDisplaySettings()
+                    }
+                }
+                RadioButton {
+                    text: qsTr("按岗位分行")
+                    checked: root.memberLayout === "task"
+                    onClicked: {
+                        root.memberLayout = "task"
+                        root.pushDisplaySettings()
+                    }
+                }
+                RadioButton {
+                    text: qsTr("每人一行")
+                    checked: root.memberLayout === "person"
+                    onClicked: {
+                        root.memberLayout = "person"
+                        root.pushDisplaySettings()
+                    }
                 }
             }
         }

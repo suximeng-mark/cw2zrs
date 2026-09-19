@@ -22,6 +22,15 @@ HISTORY_LIMIT = 400
 HISTORY_FLUSH_DELAY_MS = 1500
 SLOTS_CACHE_LIMIT = 256
 
+# 成员排列方式：inline=全部合并一行 / task=按岗位分行 / person=每人一行
+LAYOUT_INLINE = "inline"
+LAYOUT_TASK = "task"
+LAYOUT_PERSON = "person"
+VALID_LAYOUTS = (LAYOUT_INLINE, LAYOUT_TASK, LAYOUT_PERSON)
+
+FONT_MIN = 9
+FONT_MAX = 28
+
 
 class DutyMember(ConfigBaseModel):
     name: str = ""
@@ -67,6 +76,12 @@ class DutyConfig(ConfigBaseModel):
     rotation_mode: str = MODE_WEEKLY
     manual_offset: int = 0
     holidays: List[Holiday] = []
+    # 显示设置：四个区域独立字号 + 普通模式成员排列方式
+    font_group: int = 12   # 组名胶囊（底部按钮跟随）
+    font_meta: int = 12    # 周期 / 假期 / 已调换徽标
+    font_name: int = 14    # 成员姓名
+    font_task: int = 14    # 任务
+    member_layout: str = LAYOUT_TASK
 
 
 class Plugin(CW2Plugin):
@@ -82,6 +97,10 @@ class Plugin(CW2Plugin):
         self._history_timer = QTimer(self)
         self._history_timer.setSingleShot(True)
         self._history_timer.timeout.connect(self._flush_history)
+        # 显示设置（滑块拖动）防抖落盘
+        self._display_timer = QTimer(self)
+        self._display_timer.setSingleShot(True)
+        self._display_timer.timeout.connect(self.api.config.save)
         # _elapsed_slots 结果缓存：fingerprint + 日期 -> 档位数
         self._slots_cache: Dict[tuple, int] = {}
 
@@ -119,6 +138,9 @@ class Plugin(CW2Plugin):
 
     def on_unload(self) -> None:
         try:
+            if self._display_timer.isActive():
+                self._display_timer.stop()
+                self.api.config.save()
             if self._history_timer.isActive():
                 self._history_timer.stop()
                 self._flush_history()
@@ -247,6 +269,15 @@ class Plugin(CW2Plugin):
 
     def _emit_duty_changed(self) -> None:
         QTimer.singleShot(0, self.dutyChanged.emit)
+
+    def _display_payload(self) -> Dict[str, Any]:
+        return {
+            "fontGroup": self.config.font_group,
+            "fontMeta": self.config.font_meta,
+            "fontName": self.config.font_name,
+            "fontTask": self.config.font_task,
+            "memberLayout": self.config.member_layout,
+        }
 
     # ------------------------------------------------- history (standalone)
     @staticmethod
@@ -422,6 +453,7 @@ class Plugin(CW2Plugin):
             "isHoliday": self._is_holiday(today),
             "holidayName": self._holiday_name(today),
         }
+        result.update(self._display_payload())
 
         if groups:
             idx = (slots + self.config.manual_offset) % len(groups)
@@ -522,6 +554,43 @@ class Plugin(CW2Plugin):
     @Slot(result=str)
     def get_rotation_mode(self) -> str:
         return self.config.rotation_mode
+
+    # --------------------------------------------------------- display
+    @Slot(result="QVariant")
+    def get_display_settings(self) -> Dict[str, Any]:
+        return self._display_payload()
+
+    @Slot(int, int, int, int, str, result=bool)
+    def save_display_settings(
+        self,
+        font_group: int,
+        font_meta: int,
+        font_name: int,
+        font_task: int,
+        member_layout: str,
+    ) -> bool:
+        """保存显示设置。滑块拖动时高频调用：setattr 只触发一次
+        configChanged（实时预览），写盘防抖 400ms 合并。"""
+        from loguru import logger
+
+        try:
+            def clamp(v: Any) -> int:
+                v = int(v)
+                return max(FONT_MIN, min(FONT_MAX, v))
+
+            layout = member_layout if member_layout in VALID_LAYOUTS else LAYOUT_TASK
+            with self._batch_config_update():
+                self.config.font_group = clamp(font_group)
+                self.config.font_meta = clamp(font_meta)
+                self.config.font_name = clamp(font_name)
+                self.config.font_task = clamp(font_task)
+                self.config.member_layout = layout
+            self._emit_duty_changed()
+            self._display_timer.start(400)
+            return True
+        except (ValueError, TypeError) as e:
+            logger.error(f"[值日生] 显示设置保存失败: {e}")
+            return False
 
     @Slot()
     def prev_group(self) -> None:

@@ -13,35 +13,45 @@ Widget {
 
     text: qsTr("今日值日生")
 
-    height: miniMode ? 82 : (132 + root.rows.length * 28)
+    // 四个区域字号由设置页配置（未加载时用默认值）
+    function fGroup() { return root.duty ? root.duty.fontGroup : 12 }
+    function fMeta()  { return root.duty ? root.duty.fontMeta  : 12 }
+    function fName()  { return root.duty ? root.duty.fontName  : 14 }
+    function fTask()  { return root.duty ? root.duty.fontTask  : 14 }
+
+    // 高度：普通模式 = 基件余量 + 头部 + 成员区 + 按钮行；
+    // 紧凑模式 = 基件余量 + 三行内容（均随字号变化）
+    height: miniMode
+            ? miniColumn.implicitHeight + 21
+            : 82 + normalHeader.implicitHeight + memberArea.implicitHeight + buttonRow.implicitHeight
     implicitWidth: miniMode ? root.miniWidth() : 250
 
     // 紧凑模式三行布局的宽度度量
     TextMetrics {
         id: tmMiniGroup
-        font.pixelSize: 10
+        font.pixelSize: root.fGroup()
         font.weight: Font.DemiBold
         text: root.duty ? root.duty.groupName : ""
     }
     TextMetrics {
         id: tmMiniPeriod
-        font.pixelSize: 10
+        font.pixelSize: root.fMeta()
         text: root.periodText()
     }
     TextMetrics {
         id: tmMiniHoliday
-        font.pixelSize: 9
+        font.pixelSize: root.fMeta()
         text: (root.duty && root.duty.holidayName) ? root.duty.holidayName : qsTr("假期中")
     }
     TextMetrics {
         id: tmMiniMembers
-        font.pixelSize: 13
+        font.pixelSize: root.fName()
         font.weight: Font.DemiBold
         text: root.membersInlineText()
     }
     TextMetrics {
         id: tmMiniTasks
-        font.pixelSize: 12
+        font.pixelSize: root.fTask()
         text: root.tasksInlineText()
     }
 
@@ -70,25 +80,49 @@ Widget {
         root.rows = root.displayRows()
     }
 
-    // 按岗位（task）把成员归并成行；无岗位的成员每人独占一行
+    // 普通模式成员行构建：
+    // inline=全部合并一行（姓名后括注岗位）；task=按岗位归并行；person=每人一行
     function displayRows() {
         if (!root.duty || !root.duty.members) return []
-        var out = []
-        var taskIndex = ({})
+        var layout = root.duty.memberLayout || "task"
         var ms = root.duty.members
-        for (var i = 0; i < ms.length; i++) {
-            var m = ms[i]
+
+        function dispName(m) {
             var nm = (m.name && m.name.length > 0) ? m.name : qsTr("（未命名）")
             if (m.status === "absent") nm += qsTr("（假）")
-            if (m.task) {
+            return nm
+        }
+
+        if (layout === "inline") {
+            var labels = []
+            for (var k = 0; k < ms.length; k++) {
+                var label = dispName(ms[k])
+                if (ms[k].task) label += qsTr("（%1）").arg(ms[k].task)
+                labels.push(label)
+            }
+            return [{
+                inline: true,
+                task: "",
+                names: [labels.length > 0 ? labels.join("、") : qsTr("（无值日生）")]
+            }]
+        }
+
+        var out = []
+        var taskIndex = ({})
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]
+            var nm = dispName(m)
+            if (layout === "person") {
+                out.push({ inline: false, task: m.task || "", names: [nm] })
+            } else if (m.task) {
                 if (taskIndex[m.task] === undefined) {
                     taskIndex[m.task] = out.length
-                    out.push({ task: m.task, names: [nm] })
+                    out.push({ inline: false, task: m.task, names: [nm] })
                 } else {
                     out[taskIndex[m.task]].names.push(nm)
                 }
             } else {
-                out.push({ task: "", names: [nm] })
+                out.push({ inline: false, task: "", names: [nm] })
             }
         }
         return out
@@ -139,8 +173,8 @@ Widget {
         property bool accent: false
         signal clicked()
 
-        Layout.preferredHeight: 28
-        radius: 14
+        Layout.preferredHeight: Math.max(28, root.fGroup() * 2 + 2)
+        radius: pill.height / 2
         opacity: pill.enabled ? 1.0 : 0.4
         color: pill.accent
                ? Colors.proxy.primaryColor
@@ -149,7 +183,7 @@ Widget {
         Text {
             anchors.centerIn: parent
             text: pill.label
-            font.pixelSize: 12
+            font.pixelSize: root.fGroup()
             color: pill.accent
                    ? "#FFFFFF"
                    : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
@@ -165,8 +199,9 @@ Widget {
         anchors.fill: parent
         spacing: 6
 
-        // ===== 紧凑模式：两行显示，宽度随内容变化 =====
+        // ===== 紧凑模式：三行显示，宽度随内容变化 =====
         ColumnLayout {
+            id: miniColumn
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 4
@@ -178,9 +213,9 @@ Widget {
                 spacing: 6
 
                 Rectangle {
-                    Layout.preferredHeight: 18
+                    Layout.preferredHeight: Math.max(18, miniGroupText.implicitHeight + 8)
                     Layout.preferredWidth: miniGroupText.implicitWidth + 14
-                    radius: 9
+                    radius: height / 2
                     color: Colors.proxy.primaryColor
 
                     Text {
@@ -188,23 +223,23 @@ Widget {
                         anchors.centerIn: parent
                         text: root.duty ? root.duty.groupName : "—"
                         color: "#FFFFFF"
-                        font.pixelSize: 10
+                        font.pixelSize: root.fGroup()
                         font.weight: Font.DemiBold
                     }
                 }
 
                 Text {
                     text: root.periodText()
-                    font.pixelSize: 10
+                    font.pixelSize: root.fMeta()
                     opacity: 0.55
                     visible: root.duty
                 }
 
                 Rectangle {
                     visible: root.duty && root.duty.isHoliday
-                    Layout.preferredHeight: 14
+                    Layout.preferredHeight: Math.max(14, miniHolidayText.implicitHeight + 5)
                     Layout.preferredWidth: miniHolidayText.implicitWidth + 10
-                    radius: 7
+                    radius: height / 2
                     color: "#E5A100"
 
                     Text {
@@ -213,7 +248,7 @@ Widget {
                         text: (root.duty && root.duty.holidayName)
                               ? root.duty.holidayName : qsTr("假期中")
                         color: "#FFFFFF"
-                        font.pixelSize: 9
+                        font.pixelSize: root.fMeta()
                     }
                 }
 
@@ -223,7 +258,7 @@ Widget {
             // 第二行：全部成员姓名（宽度可变，超长时在部件最大宽度内省略）
             Text {
                 text: root.membersInlineText()
-                font.pixelSize: 13
+                font.pixelSize: root.fName()
                 font.weight: Font.DemiBold
                 color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
                 elide: Text.ElideRight
@@ -233,7 +268,7 @@ Widget {
             // 第三行：全部成员任务（与第二行按位置一一对应）
             Text {
                 text: root.tasksInlineText()
-                font.pixelSize: 12
+                font.pixelSize: root.fTask()
                 color: Theme.isDark()
                        ? Qt.alpha("#FFFFFF", 0.6)
                        : Qt.alpha("#000000", 0.55)
@@ -250,14 +285,15 @@ Widget {
 
         // ===== 普通模式：完整展开 =====
         RowLayout {
+            id: normalHeader
             Layout.fillWidth: true
             spacing: 8
             visible: !root.miniMode
 
             Rectangle {
-                Layout.preferredHeight: 22
+                Layout.preferredHeight: Math.max(22, groupText.implicitHeight + 10)
                 Layout.preferredWidth: groupText.implicitWidth + 22
-                radius: 11
+                radius: height / 2
                 color: Colors.proxy.primaryColor
 
                 Text {
@@ -265,22 +301,22 @@ Widget {
                     anchors.centerIn: parent
                     text: root.duty ? root.duty.groupName : "—"
                     color: "#FFFFFF"
-                    font.pixelSize: 12
+                    font.pixelSize: root.fGroup()
                     font.weight: Font.DemiBold
                 }
             }
 
             Text {
                 text: root.periodText()
-                font.pixelSize: 12
+                font.pixelSize: root.fMeta()
                 opacity: 0.6
             }
 
             Rectangle {
                 visible: root.duty && root.duty.isHoliday
-                Layout.preferredHeight: 18
+                Layout.preferredHeight: Math.max(18, holidayBadgeText.implicitHeight + 8)
                 Layout.preferredWidth: holidayBadgeText.implicitWidth + 14
-                radius: 9
+                radius: height / 2
                 color: "#E5A100"
 
                 Text {
@@ -289,15 +325,15 @@ Widget {
                     text: root.duty && root.duty.holidayName
                           ? root.duty.holidayName : qsTr("假期中")
                     color: "#FFFFFF"
-                    font.pixelSize: 10
+                    font.pixelSize: root.fMeta()
                 }
             }
 
             Rectangle {
                 visible: root.duty && root.duty.switched
-                Layout.preferredHeight: 18
+                Layout.preferredHeight: Math.max(18, switchedBadgeText.implicitHeight + 8)
                 Layout.preferredWidth: switchedBadgeText.implicitWidth + 14
-                radius: 9
+                radius: height / 2
                 color: "transparent"
                 border.width: 1
                 border.color: Theme.isDark() ? Qt.alpha("#FFFFFF", 0.4) : Qt.alpha("#000000", 0.3)
@@ -306,7 +342,7 @@ Widget {
                     id: switchedBadgeText
                     anchors.centerIn: parent
                     text: qsTr("已调换")
-                    font.pixelSize: 10
+                    font.pixelSize: root.fMeta()
                     color: Theme.isDark()
                            ? Qt.alpha("#FFFFFF", 0.7)
                            : Qt.alpha("#000000", 0.6)
@@ -316,38 +352,48 @@ Widget {
             Item { Layout.fillWidth: true }
         }
 
-        Repeater {
-            model: root.rows
+        // 成员区：排列方式由设置控制（inline/task/person），
+        // 用独立 ColumnLayout 承载，部件高度绑定其 implicitHeight
+        ColumnLayout {
+            id: memberArea
+            Layout.fillWidth: true
+            spacing: 4
+            visible: !root.miniMode
 
-            delegate: RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                visible: !root.miniMode
+            Repeater {
+                model: root.rows
 
-                Text {
-                    visible: modelData.task !== ""
-                    text: modelData.task ? modelData.task + "：" : ""
-                    font.pixelSize: 14
-                    font.weight: Font.DemiBold
-                    color: Colors.proxy.primaryColor
-                }
-
-                Text {
-                    text: modelData.names.join("、")
-                    font.pixelSize: modelData.task !== "" ? 14 : 15
-                    font.weight: modelData.task !== "" ? Font.Normal : Font.DemiBold
-                    wrapMode: Text.WordWrap
+                delegate: RowLayout {
                     Layout.fillWidth: true
-                    color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
-                }
+                    spacing: 8
 
-                Item { Layout.fillWidth: true }
+                    Text {
+                        visible: !modelData.inline && modelData.task !== ""
+                        text: modelData.task ? modelData.task + "：" : ""
+                        font.pixelSize: root.fTask()
+                        font.weight: Font.DemiBold
+                        color: Colors.proxy.primaryColor
+                    }
+
+                    Text {
+                        text: modelData.names.join("、")
+                        font.pixelSize: root.fName()
+                        font.weight: (!modelData.inline && modelData.task !== "")
+                                     ? Font.Normal : Font.DemiBold
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                    }
+
+                    Item { Layout.fillWidth: true }
+                }
             }
         }
 
         Item { Layout.fillHeight: true; visible: !root.miniMode }
 
         RowLayout {
+            id: buttonRow
             Layout.fillWidth: true
             spacing: 6
             visible: !root.miniMode
