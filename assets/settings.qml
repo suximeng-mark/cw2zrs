@@ -23,6 +23,19 @@ PluginPage {
     property int fontName: 14
     property int fontTask: 14
     property string memberLayout: "task"
+    property string pairStyle: "paren"
+    property var pairStyleLabels: [
+        qsTr("姓名（任务）"),
+        qsTr("姓名·任务"),
+        qsTr("两列对齐"),
+        qsTr("任务：姓名")
+    ]
+    property var pairStyleValues: ["paren", "dot", "columns", "taskfirst"]
+
+    function pairStyleIndex() {
+        var i = root.pairStyleValues.indexOf(root.pairStyle)
+        return i >= 0 ? i : 0
+    }
 
     function loadDisplayData() {
         if (!root.backend) return
@@ -33,13 +46,15 @@ PluginPage {
         root.fontName = d.fontName
         root.fontTask = d.fontTask
         root.memberLayout = d.memberLayout
+        root.pairStyle = d.pairStyle
+        if (pairCombo) pairCombo.currentIndex = root.pairStyleIndex()
     }
 
     function pushDisplaySettings() {
         if (!root.backend) return
         root.backend.save_display_settings(
             root.fontGroup, root.fontMeta, root.fontName, root.fontTask,
-            root.memberLayout
+            root.memberLayout, root.pairStyle
         )
     }
 
@@ -231,7 +246,7 @@ PluginPage {
         Layout.fillWidth: true
         icon.name: "ic_fluent_text_font_size_20_regular"
         title: qsTr("显示设置")
-        description: qsTr("四个区域字号独立调节（9~28px），拖动即时预览；排列方式控制普通模式下成员的密度")
+        description: qsTr("四个区域字号独立调节（9~28px），拖动即时预览；成员排列控制普通模式密度，姓名对应控制姓名与任务的配对样式（紧凑/普通均生效）")
 
         ColumnLayout {
             Layout.fillWidth: true
@@ -370,6 +385,28 @@ PluginPage {
                     checked: root.memberLayout === "person"
                     onClicked: {
                         root.memberLayout = "person"
+                        root.pushDisplaySettings()
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                Label {
+                    text: qsTr("姓名对应")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                    Layout.preferredWidth: 72
+                }
+                ComboBox {
+                    id: pairCombo
+                    Layout.fillWidth: true
+                    model: root.pairStyleLabels
+                    Component.onCompleted: currentIndex = root.pairStyleIndex()
+                    onActivated: {
+                        root.pairStyle = root.pairStyleValues[index]
                         root.pushDisplaySettings()
                     }
                 }

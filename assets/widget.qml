@@ -44,15 +44,23 @@ Widget {
         text: (root.duty && root.duty.holidayName) ? root.duty.holidayName : qsTr("假期中")
     }
     TextMetrics {
-        id: tmMiniMembers
+        id: tmMiniPair
         font.pixelSize: root.fName()
         font.weight: Font.DemiBold
-        text: root.membersInlineText()
+        text: root.pairedInlineText()
     }
+    // 两列对齐时左列（姓名）宽度
     TextMetrics {
-        id: tmMiniTasks
+        id: tmColName
+        font.pixelSize: root.fName()
+        font.weight: Font.DemiBold
+        text: root.longestLeftText()
+    }
+    // 两列对齐时右列（任务）宽度
+    TextMetrics {
+        id: tmColTask
         font.pixelSize: root.fTask()
-        text: root.tasksInlineText()
+        text: root.longestRightText()
     }
 
     function miniWidth() {
@@ -60,8 +68,12 @@ Widget {
         var top = tmMiniGroup.width + 14 + 6 + tmMiniPeriod.width
         if (root.duty && root.duty.isHoliday)
             top += 6 + tmMiniHoliday.width + 10
-        // 第二行：全部成员名，第三行：全部任务名
-        var content = Math.max(top, tmMiniMembers.width, tmMiniTasks.width)
+        // 成员区：连接符合并为一行；两列模式 = 姓名列 + 间距 + 任务列
+        var content
+        if (root.pairStyle() === "columns")
+            content = Math.max(top, tmColName.width + 8 + tmColTask.width)
+        else
+            content = Math.max(top, tmMiniPair.width)
         // +48 与基件 Widget 的内容边距算法保持一致
         return Math.max(150, Math.min(root.miniMaxWidth, content + 48))
     }
@@ -80,41 +92,123 @@ Widget {
         root.rows = root.displayRows()
     }
 
-    // 普通模式成员行构建：
-    // inline=全部合并一行（姓名后括注岗位）；task=按岗位归并行；person=每人一行
-    function displayRows() {
+    // ------------------------------------------------ 姓名/任务配对
+    function pairStyle() {
+        return root.duty ? (root.duty.pairStyle || "paren") : "paren"
+    }
+
+    function dispNameOf(m) {
+        var nm = (m.name && m.name.length > 0) ? m.name : qsTr("（未命名）")
+        if (m.status === "absent") nm += qsTr("（假）")
+        return nm
+    }
+
+    // 单个成员的“姓名↔任务”配对文字（连接符样式由 pairStyle 决定）
+    function pairLabel(m) {
+        var nm = root.dispNameOf(m)
+        var t = (m.task && m.task.length > 0) ? m.task : ""
+        if (!t) return nm
+        switch (root.pairStyle()) {
+        case "dot":
+            return nm + "·" + t
+        case "taskfirst":
+            return t + "：" + nm
+        case "paren":
+        default:
+            return nm + qsTr("（%1）").arg(t)
+        }
+    }
+
+    // 连接符样式下，紧凑模式/普通合并一行的整行文本
+    function pairedInlineText() {
+        if (!root.duty || !root.duty.members || root.duty.members.length === 0)
+            return qsTr("（无值日生）")
+        var labels = []
+        for (var i = 0; i < root.duty.members.length; i++)
+            labels.push(root.pairLabel(root.duty.members[i]))
+        return labels.join("、")
+    }
+
+    function longestLeftText() {
+        if (!root.duty || !root.duty.members) return ""
+        var best = ""
+        var sets = [root.columnRows(false), root.columnRows(true)]
+        for (var s = 0; s < sets.length; s++)
+            for (var i = 0; i < sets[s].length; i++)
+                if (sets[s][i].left.length > best.length) best = sets[s][i].left
+        return best
+    }
+
+    function longestRightText() {
+        if (!root.duty || !root.duty.members) return "—"
+        var best = "—"
+        var sets = [root.columnRows(false), root.columnRows(true)]
+        for (var s = 0; s < sets.length; s++)
+            for (var i = 0; i < sets[s].length; i++)
+                if ((sets[s][i].right || "").length > best.length) best = sets[s][i].right
+        return best
+    }
+
+    // 两列对齐模式的行数据：{left, right, isTask}
+    // perPerson=true（紧凑模式）：每个成员一行；false 时按岗位布局决定
+    function columnRows(perPerson) {
         if (!root.duty || !root.duty.members) return []
         var layout = root.duty.memberLayout || "task"
         var ms = root.duty.members
 
-        function dispName(m) {
-            var nm = (m.name && m.name.length > 0) ? m.name : qsTr("（未命名）")
-            if (m.status === "absent") nm += qsTr("（假）")
-            return nm
+        if (!perPerson && layout === "task") {
+            var out = []
+            var taskIndex = ({})
+            for (var i = 0; i < ms.length; i++) {
+                var m = ms[i]
+                var nm = root.dispNameOf(m)
+                if (m.task) {
+                    if (taskIndex[m.task] === undefined) {
+                        taskIndex[m.task] = out.length
+                        out.push({ left: m.task, right: nm, isTask: true })
+                    } else {
+                        out[taskIndex[m.task]].right += "、" + nm
+                    }
+                } else {
+                    out.push({ left: nm, right: "—", isTask: false })
+                }
+            }
+            return out
         }
 
+        var rows = []
+        for (var k = 0; k < ms.length; k++) {
+            var mm = ms[k]
+            rows.push({
+                left: root.dispNameOf(mm),
+                right: (mm.task && mm.task.length > 0) ? mm.task : "—",
+                isTask: false
+            })
+        }
+        return rows
+    }
+
+    // 普通模式成员行构建（非两列模式）：
+    // inline=全部合并一行；person=每人一行；task=按岗位归并行
+    function displayRows() {
+        if (!root.duty || !root.duty.members) return []
+        if (root.pairStyle() === "columns") return []
+        var layout = root.duty.memberLayout || "task"
+        var ms = root.duty.members
+
         if (layout === "inline") {
-            var labels = []
-            for (var k = 0; k < ms.length; k++) {
-                var label = dispName(ms[k])
-                if (ms[k].task) label += qsTr("（%1）").arg(ms[k].task)
-                labels.push(label)
-            }
-            return [{
-                inline: true,
-                task: "",
-                names: [labels.length > 0 ? labels.join("、") : qsTr("（无值日生）")]
-            }]
+            return [{ inline: true, task: "", names: [root.pairedInlineText()] }]
         }
 
         var out = []
         var taskIndex = ({})
         for (var i = 0; i < ms.length; i++) {
             var m = ms[i]
-            var nm = dispName(m)
             if (layout === "person") {
-                out.push({ inline: false, task: m.task || "", names: [nm] })
+                // 每人一行，配对写法跟随所选连接符
+                out.push({ inline: true, task: "", names: [root.pairLabel(m)] })
             } else if (m.task) {
+                var nm = root.dispNameOf(m)
                 if (taskIndex[m.task] === undefined) {
                     taskIndex[m.task] = out.length
                     out.push({ inline: false, task: m.task, names: [nm] })
@@ -122,7 +216,7 @@ Widget {
                     out[taskIndex[m.task]].names.push(nm)
                 }
             } else {
-                out.push({ inline: false, task: "", names: [nm] })
+                out.push({ inline: false, task: "", names: [root.dispNameOf(m)] })
             }
         }
         return out
@@ -134,32 +228,6 @@ Widget {
         if (root.duty.rotationMode === "daily") return qsTr("第 %1 天").arg(n)
         if (root.duty.rotationMode === "workday") return qsTr("第 %1 轮").arg(n)
         return qsTr("第 %1 周").arg(n)
-    }
-
-    function membersInlineText() {
-        if (!root.duty || !root.duty.members || root.duty.members.length === 0)
-            return qsTr("（无值日生）")
-        var names = []
-        for (var i = 0; i < root.duty.members.length; i++) {
-            var n = root.duty.members[i].name
-            var s = (n && n.length > 0) ? n : qsTr("未命名")
-            if (root.duty.members[i].status === "absent") s += qsTr("（假）")
-            names.push(s)
-        }
-        return names.join("、")
-    }
-
-    function tasksInlineText() {
-        if (!root.duty || !root.duty.members || root.duty.members.length === 0)
-            return ""
-        var tasks = []
-        for (var i = 0; i < root.duty.members.length; i++) {
-            var t = root.duty.members[i].task
-            var s = (t && t.length > 0) ? t : "—"
-            if (root.duty.members[i].status === "absent") s += qsTr("（假）")
-            tasks.push(s)
-        }
-        return tasks.join("、")
     }
 
     actions: Subtitle {
@@ -255,9 +323,10 @@ Widget {
                 Item { Layout.fillWidth: true }
             }
 
-            // 第二行：全部成员姓名（宽度可变，超长时在部件最大宽度内省略）
+            // 第二行：姓名与任务一一对应（连接符样式合并为一行）
             Text {
-                text: root.membersInlineText()
+                visible: root.pairStyle() !== "columns"
+                text: root.pairedInlineText()
                 font.pixelSize: root.fName()
                 font.weight: Font.DemiBold
                 color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
@@ -265,15 +334,39 @@ Widget {
                 Layout.maximumWidth: root.miniMaxWidth - 48
             }
 
-            // 第三行：全部成员任务（与第二行按位置一一对应）
-            Text {
-                text: root.tasksInlineText()
-                font.pixelSize: root.fTask()
-                color: Theme.isDark()
-                       ? Qt.alpha("#FFFFFF", 0.6)
-                       : Qt.alpha("#000000", 0.55)
-                elide: Text.ElideRight
+            // 两列对齐：每个成员一行，左姓名右任务
+            ColumnLayout {
                 Layout.maximumWidth: root.miniMaxWidth - 48
+                visible: root.pairStyle() === "columns"
+                spacing: 2
+
+                Repeater {
+                    model: root.pairStyle() === "columns"
+                           ? root.columnRows(true) : 0
+
+                    delegate: RowLayout {
+                        spacing: 8
+
+                        Text {
+                            text: modelData.left
+                            font.pixelSize: root.fName()
+                            font.weight: Font.DemiBold
+                            color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                            elide: Text.ElideRight
+                            Layout.preferredWidth: tmColName.width
+                        }
+
+                        Text {
+                            text: modelData.right
+                            font.pixelSize: root.fTask()
+                            color: Theme.isDark()
+                                   ? Qt.alpha("#FFFFFF", 0.6)
+                                   : Qt.alpha("#000000", 0.55)
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
             }
         }
 
@@ -353,15 +446,16 @@ Widget {
         }
 
         // 成员区：排列方式由设置控制（inline/task/person），
-        // 用独立 ColumnLayout 承载，部件高度绑定其 implicitHeight
+        // 配对样式为 columns 时左右两列对齐；部件高度绑定其 implicitHeight
         ColumnLayout {
             id: memberArea
             Layout.fillWidth: true
             spacing: 4
             visible: !root.miniMode
 
+            // 非两列模式：按行（连接符样式/岗位归并）
             Repeater {
-                model: root.rows
+                model: root.pairStyle() !== "columns" ? root.rows : 0
 
                 delegate: RowLayout {
                     Layout.fillWidth: true
@@ -383,6 +477,41 @@ Widget {
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
                         color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                    }
+
+                    Item { Layout.fillWidth: true }
+                }
+            }
+
+            // 两列模式：左列任务/姓名、右列姓名/任务，纵向一一对应
+            Repeater {
+                model: root.pairStyle() === "columns"
+                       ? root.columnRows(false) : 0
+
+                delegate: RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Text {
+                        text: modelData.left
+                        font.pixelSize: modelData.isTask ? root.fTask() : root.fName()
+                        font.weight: Font.DemiBold
+                        color: modelData.isTask
+                               ? Colors.proxy.primaryColor
+                               : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                        elide: Text.ElideRight
+                        Layout.preferredWidth: Math.max(tmColName.width, tmColTask.width)
+                    }
+
+                    Text {
+                        text: modelData.right
+                        font.pixelSize: modelData.isTask ? root.fName() : root.fTask()
+                        font.weight: Font.Normal
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        color: Theme.isDark()
+                               ? Qt.alpha("#FFFFFF", modelData.isTask ? 1.0 : 0.6)
+                               : Qt.alpha("#000000", modelData.isTask ? 1.0 : 0.55)
                     }
 
                     Item { Layout.fillWidth: true }

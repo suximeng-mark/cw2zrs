@@ -31,6 +31,14 @@ VALID_LAYOUTS = (LAYOUT_INLINE, LAYOUT_TASK, LAYOUT_PERSON)
 FONT_MIN = 9
 FONT_MAX = 28
 
+# 姓名与任务的配对样式：paren=姓名（任务）/ dot=姓名·任务 /
+# columns=两列对齐 / taskfirst=任务：姓名
+PAIR_PAREN = "paren"
+PAIR_DOT = "dot"
+PAIR_COLUMNS = "columns"
+PAIR_TASKFIRST = "taskfirst"
+VALID_PAIR_STYLES = (PAIR_PAREN, PAIR_DOT, PAIR_COLUMNS, PAIR_TASKFIRST)
+
 
 class DutyMember(ConfigBaseModel):
     name: str = ""
@@ -82,6 +90,7 @@ class DutyConfig(ConfigBaseModel):
     font_name: int = 14    # 成员姓名
     font_task: int = 14    # 任务
     member_layout: str = LAYOUT_TASK
+    pair_style: str = PAIR_PAREN  # 姓名与任务的一一对应样式
 
 
 class Plugin(CW2Plugin):
@@ -277,6 +286,7 @@ class Plugin(CW2Plugin):
             "fontName": self.config.font_name,
             "fontTask": self.config.font_task,
             "memberLayout": self.config.member_layout,
+            "pairStyle": self.config.pair_style,
         }
 
     # ------------------------------------------------- history (standalone)
@@ -560,7 +570,7 @@ class Plugin(CW2Plugin):
     def get_display_settings(self) -> Dict[str, Any]:
         return self._display_payload()
 
-    @Slot(int, int, int, int, str, result=bool)
+    @Slot(int, int, int, int, str, str, result=bool)
     def save_display_settings(
         self,
         font_group: int,
@@ -568,6 +578,7 @@ class Plugin(CW2Plugin):
         font_name: int,
         font_task: int,
         member_layout: str,
+        pair_style: str,
     ) -> bool:
         """保存显示设置。滑块拖动时高频调用：setattr 只触发一次
         configChanged（实时预览），写盘防抖 400ms 合并。"""
@@ -579,12 +590,14 @@ class Plugin(CW2Plugin):
                 return max(FONT_MIN, min(FONT_MAX, v))
 
             layout = member_layout if member_layout in VALID_LAYOUTS else LAYOUT_TASK
+            pair = pair_style if pair_style in VALID_PAIR_STYLES else PAIR_PAREN
             with self._batch_config_update():
                 self.config.font_group = clamp(font_group)
                 self.config.font_meta = clamp(font_meta)
                 self.config.font_name = clamp(font_name)
                 self.config.font_task = clamp(font_task)
                 self.config.member_layout = layout
+                self.config.pair_style = pair
             self._emit_duty_changed()
             self._display_timer.start(400)
             return True
