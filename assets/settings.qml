@@ -706,6 +706,64 @@ PluginPage {
         }
     }
 
+    SettingCard {
+        Layout.fillWidth: true
+        icon.name: "ic_fluent_arrow_import_20_regular"
+        title: qsTr("配置导入 / 导出")
+        description: qsTr("导出当前分组、轮换和假期到文件；从文件快速导入配置（不含历史记录和手动调换）")
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            TextField {
+                id: configPathField
+                Layout.fillWidth: true
+                text: Qt.platform.os === "windows" ? "C:/Users/Lenovo/Desktop/duty_config.json" : "~/Desktop/duty_config.json"
+                placeholderText: qsTr("文件路径，如 C:/Users/.../duty_config.json")
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: qsTr("导出配置")
+                    onClicked: {
+                        var r = root.backend.export_config(configPathField.text)
+                        configResultText.text = r.ok
+                            ? qsTr("已导出到：") + r.msg
+                            : qsTr("导出失败：") + r.msg
+                        configResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                    }
+                }
+
+                Button {
+                    text: qsTr("导入配置")
+                    highlighted: true
+                    onClicked: {
+                        var r = root.backend.import_config(configPathField.text)
+                        configResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
+                        configResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                        if (r.ok) {
+                            root.loadData()
+                        }
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+            }
+
+            Text {
+                id: configResultText
+                Layout.fillWidth: true
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
+            }
+        }
+    }
+
     Button {
         Layout.fillWidth: true
         text: qsTr("保存设置")
