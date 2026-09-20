@@ -160,8 +160,10 @@ class Plugin(CW2Plugin):
         self._history_timer = QTimer(self)
         self._history_timer.setSingleShot(True)
         self._history_timer.timeout.connect(self._flush_history)
-        # _elapsed_slots 结果缓存：fingerprint + 日期 -> 档位数
-        self._slots_cache: Dict[tuple, int] = {}
+        # _elapsed_slots 结果缓存：fingerprint + 日期 -> 档位数（OrderedDict 实现 LRU）
+        self._slots_cache: "OrderedDict[tuple, int]" = OrderedDict()
+        # 假期 fingerprint 缓存：仅当假期列表变化时重建（_elapsed_slots 每次调用无需重排序）
+        self._holidays_fp: Optional[tuple] = None
         # 每日提醒：通知提供者（旧版核心可能无 notification API，注册失败则降级）
         self._notifier = None
         self._reminder_fired_date = ""
