@@ -11,6 +11,12 @@ Widget {
     property var rows: []
     property real miniMaxWidth: 360
 
+    // 派生数据只算一次，供多个绑定复用：
+    // tomorrow=明日预告；columnRows*=两列对齐的行数据（紧凑每人一行 / 普通按岗位）
+    property var tomorrow: (root.duty && root.duty.tomorrow) ? root.duty.tomorrow : null
+    property var columnRowsPerson: root.duty ? root.columnRows(true) : []
+    property var columnRowsGrouped: root.duty ? root.columnRows(false) : []
+
     text: qsTr("今日值日生")
 
     // 四个区域字号由设置页配置（未加载时用默认值）
@@ -19,11 +25,12 @@ Widget {
     function fName()  { return root.duty ? root.duty.fontName  : 14 }
     function fTask()  { return root.duty ? root.duty.fontTask  : 14 }
 
-    // 高度：普通模式 = 基件余量 + 头部 + 成员区 + 按钮行；
+    // 高度：普通模式 = 基件余量 + 头部 + 成员区 + 明日预告 + 按钮行；
     // 紧凑模式 = 基件余量 + 三行内容（均随字号变化）
     height: miniMode
             ? miniColumn.implicitHeight + 21
-            : 82 + normalHeader.implicitHeight + memberArea.implicitHeight + buttonRow.implicitHeight
+            : 82 + normalHeader.implicitHeight + memberArea.implicitHeight
+              + tomorrowPreview.implicitHeight + buttonRow.implicitHeight
     implicitWidth: miniMode ? root.miniWidth() : 250
 
     // 紧凑模式三行布局的宽度度量
@@ -49,6 +56,12 @@ Widget {
         font.weight: Font.DemiBold
         text: root.pairedInlineText()
     }
+    // 紧凑模式明日预告行的宽度度量（含“明日”标签宽度）
+    TextMetrics {
+        id: tmMiniTomorrow
+        font.pixelSize: root.fMeta()
+        text: root.tomorrowMiniText()
+    }
     // 两列对齐时左列（姓名）宽度
     TextMetrics {
         id: tmColName
@@ -59,7 +72,7 @@ Widget {
     // 两列对齐时右列（任务）宽度
     TextMetrics {
         id: tmColTask
-        font.pixelSize: root.fTask()
+        font.pixelSize: root.fMeta()
         text: root.longestRightText()
     }
 
@@ -68,12 +81,15 @@ Widget {
         var top = tmMiniGroup.width + 14 + 6 + tmMiniPeriod.width
         if (root.duty && root.duty.isHoliday)
             top += 6 + tmMiniHoliday.width + 10
-        // 成员区：连接符合并为一行；两列模式 = 姓名列 + 间距 + 任务列
+        // 成员区：连接符样式合并为一行；两列模式 = 姓名列 + 间距 + 任务列
         var content
         if (root.pairStyle() === "columns")
             content = Math.max(top, tmColName.width + 8 + tmColTask.width)
         else
             content = Math.max(top, tmMiniPair.width)
+        // 明日预告行：“明日”标签约 2 字 + 间距
+        if (root.tomorrowVisible())
+            content = Math.max(content, tmMiniTomorrow.width + 42)
         // +48 与基件 Widget 的内容边距算法保持一致
         return Math.max(150, Math.min(root.miniMaxWidth, content + 48))
     }
@@ -90,6 +106,36 @@ Widget {
         if (!root.backend) return
         root.duty = root.backend.get_today_duty()
         root.rows = root.displayRows()
+    }
+
+    // ------------------------------------------------ 明日预告
+    function tomorrowData() {
+        return root.tomorrow
+    }
+
+    function tomorrowVisible() {
+        return !!(root.duty && root.duty.showTomorrow && root.duty.tomorrow)
+    }
+
+    // 明日成员按当前配对样式拼成一行
+    function tomorrowMembersText() {
+        var t = root.tomorrowData()
+        if (!t || !t.members || t.members.length === 0)
+            return qsTr("（无值日生）")
+        var labels = []
+        for (var i = 0; i < t.members.length; i++)
+            labels.push(root.pairLabel(t.members[i]))
+        return labels.join("、")
+    }
+
+    // 紧凑模式第四行完整文本（供宽度度量与显示共用）
+    function tomorrowMiniText() {
+        var t = root.tomorrowData()
+        if (!t) return ""
+        var s = t.shortDate + " " + t.weekday + " " + t.groupName + " · " + root.tomorrowMembersText()
+        if (t.isHoliday)
+            s += "（" + (t.holidayName || qsTr("假期")) + "）"
+        return s
     }
 
     // ------------------------------------------------ 姓名/任务配对
@@ -132,7 +178,7 @@ Widget {
     function longestLeftText() {
         if (!root.duty || !root.duty.members) return ""
         var best = ""
-        var sets = [root.columnRows(false), root.columnRows(true)]
+        var sets = [root.columnRowsPerson, root.columnRowsGrouped]
         for (var s = 0; s < sets.length; s++)
             for (var i = 0; i < sets[s].length; i++)
                 if (sets[s][i].left.length > best.length) best = sets[s][i].left
@@ -142,7 +188,7 @@ Widget {
     function longestRightText() {
         if (!root.duty || !root.duty.members) return "—"
         var best = "—"
-        var sets = [root.columnRows(false), root.columnRows(true)]
+        var sets = [root.columnRowsPerson, root.columnRowsGrouped]
         for (var s = 0; s < sets.length; s++)
             for (var i = 0; i < sets[s].length; i++)
                 if ((sets[s][i].right || "").length > best.length) best = sets[s][i].right
@@ -342,7 +388,7 @@ Widget {
 
                 Repeater {
                     model: root.pairStyle() === "columns"
-                           ? root.columnRows(true) : 0
+                           ? root.columnRowsPerson : 0
 
                     delegate: RowLayout {
                         spacing: 8
@@ -366,6 +412,28 @@ Widget {
                             Layout.fillWidth: true
                         }
                     }
+                }
+            }
+
+            // 第三行：明日值日预告（与第二行成员区互斥排版）
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: root.tomorrowVisible()
+
+                Text {
+                    text: qsTr("明日")
+                    font.pixelSize: root.fMeta()
+                    opacity: 0.5
+                }
+                Text {
+                    text: root.tomorrowMiniText()
+                    font.pixelSize: root.fMeta()
+                    color: Theme.isDark()
+                           ? Qt.alpha("#FFFFFF", 0.85)
+                           : Qt.alpha("#000000", 0.75)
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: root.miniMaxWidth - 48
                 }
             }
         }
@@ -486,7 +554,7 @@ Widget {
             // 两列模式：左列任务/姓名、右列姓名/任务，纵向一一对应
             Repeater {
                 model: root.pairStyle() === "columns"
-                       ? root.columnRows(false) : 0
+                       ? root.columnRowsGrouped : 0
 
                 delegate: RowLayout {
                     Layout.fillWidth: true
@@ -515,6 +583,83 @@ Widget {
                     }
 
                     Item { Layout.fillWidth: true }
+                }
+            }
+        }
+
+        // 明日预告（普通模式）：独立浅色条，隐藏时不占高度
+        Rectangle {
+            id: tomorrowPreview
+            Layout.fillWidth: true
+            visible: !root.miniMode && root.tomorrowVisible()
+            implicitHeight: visible ? tomorrowPreviewRow.implicitHeight + 12 : 0
+            radius: 8
+            color: Theme.isDark()
+                   ? Qt.alpha("#FFFFFF", 0.06)
+                   : Qt.alpha("#000000", 0.045)
+
+            RowLayout {
+                id: tomorrowPreviewRow
+                anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
+                anchors.topMargin: 6
+                anchors.bottomMargin: 6
+                spacing: 8
+
+                Text {
+                    text: {
+                        var t = root.tomorrowData()
+                        return t ? qsTr("明日 %1 %2").arg(t.shortDate).arg(t.weekday) : ""
+                    }
+                    font.pixelSize: root.fMeta()
+                    opacity: 0.65
+                }
+
+                // 明日组名：描边小胶囊
+                Rectangle {
+                    Layout.preferredHeight: Math.max(18, tomGroupNameText.implicitHeight + 6)
+                    Layout.preferredWidth: tomGroupNameText.implicitWidth + 14
+                    radius: height / 2
+                    color: "transparent"
+                    border.width: 1
+                    border.color: Colors.proxy.primaryColor
+
+                    Text {
+                        id: tomGroupNameText
+                        anchors.centerIn: parent
+                        text: root.tomorrowData() ? root.tomorrowData().groupName : ""
+                        font.pixelSize: root.fMeta()
+                        color: Colors.proxy.primaryColor
+                    }
+                }
+
+                // 明日恰逢假期时给出徽标
+                Rectangle {
+                    visible: root.tomorrowData() && root.tomorrowData().isHoliday
+                    Layout.preferredHeight: Math.max(16, tomHolidayText.implicitHeight + 5)
+                    Layout.preferredWidth: tomHolidayText.implicitWidth + 10
+                    radius: height / 2
+                    color: "#E5A100"
+
+                    Text {
+                        id: tomHolidayText
+                        anchors.centerIn: parent
+                        text: (root.tomorrowData() && root.tomorrowData().holidayName)
+                              ? root.tomorrowData().holidayName : qsTr("假期")
+                        color: "#FFFFFF"
+                        font.pixelSize: Math.max(9, root.fMeta() - 1)
+                    }
+                }
+
+                Text {
+                    text: root.tomorrowMembersText()
+                    font.pixelSize: root.fName()
+                    color: Theme.isDark()
+                           ? Qt.alpha("#FFFFFF", 0.85)
+                           : Qt.alpha("#000000", 0.8)
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                 }
             }
         }

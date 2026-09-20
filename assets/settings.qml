@@ -24,6 +24,7 @@ PluginPage {
     property int fontTask: 14
     property string memberLayout: "task"
     property string pairStyle: "paren"
+    property bool showTomorrow: false
     property var pairStyleLabels: [
         qsTr("姓名（任务）"),
         qsTr("姓名·任务"),
@@ -31,6 +32,12 @@ PluginPage {
         qsTr("任务：姓名")
     ]
     property var pairStyleValues: ["paren", "dot", "columns", "taskfirst"]
+
+    // 值日提醒
+    property bool reminderEnabled: false
+    property string reminderTime: "07:30"
+    property bool reminderSkipHoliday: true
+    property bool reminderSupported: true
 
     function pairStyleIndex() {
         var i = root.pairStyleValues.indexOf(root.pairStyle)
@@ -47,6 +54,7 @@ PluginPage {
         root.fontTask = d.fontTask
         root.memberLayout = d.memberLayout
         root.pairStyle = d.pairStyle
+        root.showTomorrow = !!d.showTomorrow
         if (pairCombo) pairCombo.currentIndex = root.pairStyleIndex()
     }
 
@@ -54,17 +62,56 @@ PluginPage {
         if (!root.backend) return
         root.backend.save_display_settings(
             root.fontGroup, root.fontMeta, root.fontName, root.fontTask,
-            root.memberLayout, root.pairStyle
+            root.memberLayout, root.pairStyle, root.showTomorrow
         )
+    }
+
+    function loadReminderData() {
+        if (!root.backend) return
+        var d = root.backend.get_reminder_settings()
+        if (!d) return
+        root.reminderEnabled = !!d.enabled
+        root.reminderTime = d.time || "07:30"
+        root.reminderSkipHoliday = d.skipHoliday !== false
+        root.reminderSupported = d.supported !== false
+    }
+
+    function pushReminderSettings() {
+        if (!root.backend) return
+        var ok = root.backend.save_reminder_settings(
+            root.reminderEnabled, root.reminderTime, root.reminderSkipHoliday
+        )
+        if (ok) {
+            reminderResultText.text = qsTr("已保存")
+            reminderResultText.color = "#2E7D32"
+        } else {
+            // 时间格式非法：用后端值回滚界面
+            var d = root.backend.get_reminder_settings()
+            if (d) {
+                root.reminderEnabled = !!d.enabled
+                root.reminderTime = d.time || "07:30"
+                root.reminderSkipHoliday = d.skipHoliday !== false
+            }
+            reminderResultText.text = qsTr("保存失败：时间格式需为 HH:MM（24 小时制），如 07:30")
+            reminderResultText.color = "#E5594F"
+        }
+    }
+
+    function testReminder() {
+        if (!root.backend) return
+        var r = root.backend.test_reminder()
+        reminderResultText.text = r.msg
+        reminderResultText.color = r.ok ? "#2E7D32" : "#E5594F"
     }
 
     function loadData() {
         if (!root.backend) return
-        root.groupsData = JSON.parse(JSON.stringify(root.backend.get_groups()))
+        root.groupsData = root.clone(root.backend.get_groups())
         root.startDateText = root.backend.get_start_date()
         root.rotationMode = root.backend.get_rotation_mode()
-        root.holidaysData = JSON.parse(JSON.stringify(root.backend.get_holidays()))
+        root.holidaysData = root.clone(root.backend.get_holidays())
         root.loadDisplayData()
+        root.loadReminderData()
         root.refreshTodayStats()
     }
 
@@ -72,6 +119,17 @@ PluginPage {
         if (!root.backend) return
         root.todayData = root.backend.get_today_duty()
         root.statsData = root.backend.get_stats()
+    }
+
+    // 后端返回的是同一份 JS 对象，本地编辑前先深拷贝，避免反向污染
+    function clone(o) {
+        return JSON.parse(JSON.stringify(o))
+    }
+
+    // 假期增删后统一刷新列表与今日/统计
+    function reloadHolidays() {
+        root.holidaysData = root.clone(root.backend.get_holidays())
+        root.refreshTodayStats()
     }
 
     function validDate(s) {
@@ -83,8 +141,7 @@ PluginPage {
         if (!end || !root.validDate(end)) end = start
         var arr = root.holidaysData.concat([{ start: start, end: end, name: name }])
         if (root.backend.save_holidays(JSON.stringify(arr))) {
-            root.holidaysData = JSON.parse(JSON.stringify(root.backend.get_holidays()))
-            root.refreshTodayStats()
+            root.reloadHolidays()
             return true
         }
         return false
@@ -92,10 +149,8 @@ PluginPage {
 
     function removeHoliday(index) {
         var arr = root.holidaysData.filter(function(_, i) { return i !== index })
-        if (root.backend.save_holidays(JSON.stringify(arr))) {
-            root.holidaysData = JSON.parse(JSON.stringify(root.backend.get_holidays()))
-            root.refreshTodayStats()
-        }
+        if (root.backend.save_holidays(JSON.stringify(arr)))
+            root.reloadHolidays()
     }
 
     function toggleMemberStatus(memberIndex) {
@@ -159,7 +214,7 @@ PluginPage {
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i].trim()
             if (!line) continue
-            var parts = /[，,]/.test(line) ? line.split(/[，,]/) : line.split(/[\s\u3000]+/)
+            var parts = /[，,]/.test(line) ? line.split(/[，,]/) : line.split(/[\s　]+/)
             var name = (parts[0] || "").trim()
             if (!name) continue
             var task = parts.length > 1 ? parts.slice(1).join(" ").trim() : ""
@@ -242,6 +297,39 @@ PluginPage {
         }
     }
 
+    // 显示设置中“标签 + 字号滑块 + 像素值”一行；作为 GridLayout 直接子项横跨三列
+    component FontSliderRow: RowLayout {
+        id: fontRow
+        property string labelText: ""
+        property int sliderValue: 12
+        signal sliderMoved(int value)
+
+        Layout.fillWidth: true
+        Layout.columnSpan: 3
+        spacing: 10
+
+        Text {
+            text: fontRow.labelText
+            opacity: 0.7
+            font.pixelSize: 12
+            Layout.preferredWidth: 72
+        }
+        Slider {
+            Layout.fillWidth: true
+            from: 9
+            to: 28
+            stepSize: 1
+            value: fontRow.sliderValue
+            onMoved: fontRow.sliderMoved(Math.round(value))
+        }
+        Text {
+            text: fontRow.sliderValue + " px"
+            font.pixelSize: 12
+            Layout.preferredWidth: 44
+            horizontalAlignment: Text.AlignRight
+        }
+    }
+
     SettingCard {
         Layout.fillWidth: true
         icon.name: "ic_fluent_text_font_size_20_regular"
@@ -258,100 +346,37 @@ PluginPage {
                 columnSpacing: 10
                 rowSpacing: 2
 
-                Text {
-                    text: qsTr("组名")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 72
-                }
-                Slider {
-                    Layout.fillWidth: true
-                    from: 9
-                    to: 28
-                    stepSize: 1
-                    value: root.fontGroup
-                    onMoved: {
-                        root.fontGroup = Math.round(value)
+                FontSliderRow {
+                    labelText: qsTr("组名")
+                    sliderValue: root.fontGroup
+                    onSliderMoved: {
+                        root.fontGroup = value
                         root.pushDisplaySettings()
                     }
                 }
-                Text {
-                    text: root.fontGroup + " px"
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 44
-                    horizontalAlignment: Text.AlignRight
-                }
-
-                Text {
-                    text: qsTr("周期/徽标")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 72
-                }
-                Slider {
-                    Layout.fillWidth: true
-                    from: 9
-                    to: 28
-                    stepSize: 1
-                    value: root.fontMeta
-                    onMoved: {
-                        root.fontMeta = Math.round(value)
+                FontSliderRow {
+                    labelText: qsTr("周期/徽标")
+                    sliderValue: root.fontMeta
+                    onSliderMoved: {
+                        root.fontMeta = value
                         root.pushDisplaySettings()
                     }
                 }
-                Text {
-                    text: root.fontMeta + " px"
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 44
-                    horizontalAlignment: Text.AlignRight
-                }
-
-                Text {
-                    text: qsTr("成员姓名")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 72
-                }
-                Slider {
-                    Layout.fillWidth: true
-                    from: 9
-                    to: 28
-                    stepSize: 1
-                    value: root.fontName
-                    onMoved: {
-                        root.fontName = Math.round(value)
+                FontSliderRow {
+                    labelText: qsTr("成员姓名")
+                    sliderValue: root.fontName
+                    onSliderMoved: {
+                        root.fontName = value
                         root.pushDisplaySettings()
                     }
                 }
-                Text {
-                    text: root.fontName + " px"
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 44
-                    horizontalAlignment: Text.AlignRight
-                }
-
-                Text {
-                    text: qsTr("任务")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 72
-                }
-                Slider {
-                    Layout.fillWidth: true
-                    from: 9
-                    to: 28
-                    stepSize: 1
-                    value: root.fontTask
-                    onMoved: {
-                        root.fontTask = Math.round(value)
+                FontSliderRow {
+                    labelText: qsTr("任务")
+                    sliderValue: root.fontTask
+                    onSliderMoved: {
+                        root.fontTask = value
                         root.pushDisplaySettings()
                     }
-                }
-                Text {
-                    text: root.fontTask + " px"
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 44
-                    horizontalAlignment: Text.AlignRight
                 }
             }
 
@@ -410,6 +435,95 @@ PluginPage {
                         root.pushDisplaySettings()
                     }
                 }
+            }
+
+            Switch {
+                text: qsTr("在部件中显示明日值日预告（紧凑 / 普通模式均生效）")
+                checked: root.showTomorrow
+                enabled: !!root.backend
+                onToggled: {
+                    root.showTomorrow = checked
+                    root.pushDisplaySettings()
+                }
+            }
+        }
+    }
+
+    SettingCard {
+        Layout.fillWidth: true
+        icon.name: "ic_fluent_alert_20_regular"
+        title: qsTr("值日提醒")
+        description: qsTr("每天指定时间弹出系统通知，提醒今日值日生（含成员与任务）；需保持 Class Widgets 2 处于运行状态")
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            Switch {
+                text: qsTr("启用每日提醒")
+                checked: root.reminderEnabled
+                enabled: root.reminderSupported
+                onToggled: {
+                    root.reminderEnabled = checked
+                    root.pushReminderSettings()
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                enabled: root.reminderSupported
+
+                Label {
+                    text: qsTr("提醒时间")
+                    opacity: 0.7
+                    font.pixelSize: 12
+                }
+
+                TextField {
+                    id: reminderTimeField
+                    Layout.preferredWidth: 92
+                    text: root.reminderTime
+                    placeholderText: "07:30"
+                    horizontalAlignment: Text.AlignHCenter
+                    onEditingFinished: {
+                        root.reminderTime = text.trim()
+                        root.pushReminderSettings()
+                    }
+                }
+
+                CheckBox {
+                    text: qsTr("假期不提醒")
+                    checked: root.reminderSkipHoliday
+                    onToggled: {
+                        root.reminderSkipHoliday = checked
+                        root.pushReminderSettings()
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: qsTr("立即测试提醒")
+                    onClicked: root.testReminder()
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: !root.reminderSupported
+                text: qsTr("当前 Class Widgets 版本不支持系统通知，更新到新版后即可使用值日提醒")
+                color: "#E5594F"
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+
+            Text {
+                id: reminderResultText
+                Layout.fillWidth: true
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+                visible: text.length > 0
             }
         }
     }
@@ -978,6 +1092,22 @@ PluginPage {
         }
     }
 
+    // “未来 N 周”导出按钮：backend 由外部注入，结果经 done 信号交回外层显示
+    component WeekButton: Button {
+        id: weekBtn
+        property int weeks: 1
+        property bool accent: false
+        property var backend: null
+        signal done(var result)
+
+        highlighted: weekBtn.accent
+        text: qsTr("未来 %1 周").arg(weekBtn.weeks)
+        onClicked: {
+            if (weekBtn.backend)
+                weekBtn.done(weekBtn.backend.export_schedule(weekBtn.weeks))
+        }
+    }
+
     SettingCard {
         Layout.fillWidth: true
         icon.name: "ic_fluent_table_20_regular"
@@ -992,31 +1122,29 @@ PluginPage {
                 Layout.fillWidth: true
                 spacing: 8
 
-                Button {
-                    text: qsTr("未来 2 周")
-                    onClicked: {
-                        var r = root.backend.export_schedule(2)
-                        scheduleResultText.text = r.msg
-                        scheduleResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                WeekButton {
+                    weeks: 2
+                    backend: root.backend
+                    onDone: {
+                        scheduleResultText.text = result.msg
+                        scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F"
                     }
                 }
-
-                Button {
-                    text: qsTr("未来 4 周")
-                    highlighted: true
-                    onClicked: {
-                        var r = root.backend.export_schedule(4)
-                        scheduleResultText.text = r.msg
-                        scheduleResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                WeekButton {
+                    weeks: 4
+                    accent: true
+                    backend: root.backend
+                    onDone: {
+                        scheduleResultText.text = result.msg
+                        scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F"
                     }
                 }
-
-                Button {
-                    text: qsTr("未来 8 周")
-                    onClicked: {
-                        var r = root.backend.export_schedule(8)
-                        scheduleResultText.text = r.msg
-                        scheduleResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                WeekButton {
+                    weeks: 8
+                    backend: root.backend
+                    onDone: {
+                        scheduleResultText.text = result.msg
+                        scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F"
                     }
                 }
 
