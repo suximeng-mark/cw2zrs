@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from bisect import bisect_left
+from bisect import bisect_right
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -148,6 +148,7 @@ class Plugin(CW2Plugin):
         self._groups: List[DutyGroup] = []
         self._holidays: List[Holiday] = []
         self._start_date: str = DEFAULT_START_DATE
+        self._start_day: date = date.fromisoformat(DEFAULT_START_DATE)  # 解析缓存
         self._rotation_mode: str = MODE_WEEKLY
         self._manual_offset: int = 0
         # 临时调班：{date_iso: group_index}，仅覆盖当日自动轮换结果
@@ -171,6 +172,8 @@ class Plugin(CW2Plugin):
         self._slots_cache: "OrderedDict[tuple, int]" = OrderedDict()
         # 假期 fingerprint 缓存：仅当假期列表变化时重建（_elapsed_slots 每次调用无需重排序）
         self._holidays_fp: Optional[tuple] = None
+        # 假期二分索引缓存（惰性构建，随 fingerprint 一起失效）
+        self._holiday_idx: Optional[tuple] = None
         # 每日提醒：通知提供者（旧版核心可能无 notification API，注册失败则降级）
         self._notifier = None
         self._reminder_fired_date = ""
@@ -356,7 +359,7 @@ class Plugin(CW2Plugin):
         self._groups = groups
 
         start = str(data.get("start_date", "") or "").strip()
-        self._start_date = start if DATE_RE.fullmatch(start) else DEFAULT_START_DATE
+        self._set_start_date(start if DATE_RE.fullmatch(start) else DEFAULT_START_DATE)
 
         mode = str(data.get("rotation_mode", "") or "")
         self._rotation_mode = mode if mode in VALID_MODES else MODE_WEEKLY
@@ -379,7 +382,7 @@ class Plugin(CW2Plugin):
                         continue
         self._temp_swaps = swaps
         self._slots_cache.clear()
-        self._holidays_fp = None
+        self._invalidate_holiday_cache()
 
     def _load_config_file(self) -> Optional[Dict[str, Any]]:
         try:
@@ -459,14 +462,65 @@ class Plugin(CW2Plugin):
         return legacy_present
 
     # ------------------------------------------------------------------ utils
+    def _set_start_date(self, value: str) -> None:
+        """设置起始日期并缓存解析结果，避免 _elapsed_slots 高频调用重复 strptime。"""
+        self._start_date = value
+        self._start_day = self._parse_date(value)
+
     def _parse_date(self, date_str: str) -> date:
         try:
             return datetime.strptime(date_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return date.today()
 
+    def _holiday_index(self) -> tuple:
+        """惰性构建假期索引（随假期数据变化失效），替代逐日线性扫描。
+
+        返回 (merged_starts, merged)：重叠/相邻的假期区间合并为无重叠的
+        [(start, end)] 升序列表，可二分精确判定任意日期是否被覆盖，
+        也支持整段跳过与分段计数。
+        """
+        idx = self._holiday_idx
+        if idx is not None:
+            return idx
+        ranges: List[tuple] = []
+        for h in self._holidays:
+            try:
+                s = date.fromisoformat(h.start)
+                e = date.fromisoformat(h.end or h.start)
+            except ValueError:
+                continue
+            if e < s:
+                s, e = e, s
+            ranges.append((s, e))
+        ranges.sort()
+        merged: List[tuple] = []
+        for s, e in ranges:
+            # 相邻（touching）也合并：整周/整段判定依赖并集语义
+            if merged and s <= merged[-1][1] + timedelta(days=1):
+                if e > merged[-1][1]:
+                    merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
+        idx = ([m[0] for m in merged], merged)
+        self._holiday_idx = idx
+        return idx
+
+    def _invalidate_holiday_cache(self) -> None:
+        """假期数据变化后使 fingerprint 与二分索引同时失效。"""
+        self._holidays_fp = None
+        self._holiday_idx = None
+
     def _find_holiday(self, day: date) -> Optional[Holiday]:
-        """返回覆盖该日期的假期配置；非假期返回 None（单次扫描）。"""
+        """返回覆盖该日期的假期配置；非假期返回 None。
+
+        保持原始“按列表序首个覆盖”语义（重叠区间时名称显示与旧版一致）：
+        先用合并区间 O(log H) 排除非假期（常见路径），命中时再线性扫描取对象。
+        """
+        merged_starts, merged = self._holiday_index()
+        i = bisect_right(merged_starts, day) - 1
+        if i < 0 or day > merged[i][1]:
+            return None
         iso = day.isoformat()
         for h in self._holidays:
             if h.start and h.start <= iso <= (h.end or h.start):
@@ -474,7 +528,10 @@ class Plugin(CW2Plugin):
         return None
 
     def _is_holiday(self, day: date) -> bool:
-        return self._find_holiday(day) is not None
+        """O(log H)：在合并后的无重叠区间上二分判定。"""
+        merged_starts, merged = self._holiday_index()
+        i = bisect_right(merged_starts, day) - 1
+        return i >= 0 and day <= merged[i][1]
 
     def _holiday_name(self, day: date) -> str:
         """假期显示名；非假期返回空串，未命名假期返回“假期”。"""
@@ -517,7 +574,7 @@ class Plugin(CW2Plugin):
 
         结果按 (起始日期, 模式, 假期, 目标日期) 缓存，同一天的重复调用为 O(1)。
         """
-        start = self._parse_date(self._start_date)
+        start = self._start_day
         today = today or date.today()
         if today <= start:
             return 0
@@ -540,45 +597,59 @@ class Plugin(CW2Plugin):
         return slots
 
     def _compute_elapsed_slots(self, start: date, today: date) -> int:
+        """按模式计算 (start, today] 内的轮换档数。
+
+        daily/weekly 为闭式公式（O(H)，与跨度天数无关）；
+        workday 逐日但假期整段跳过（迭代次数 ≈ 非假期天数 + 假期段数）。
+        语义与旧逐日实现完全一致（由 tests/test_rotation.py 差分验证）。
+        """
         mode = self._rotation_mode
         days = (today - start).days
+        if days <= 0:
+            return 0
+        merged_starts, merged = self._holiday_index()
+        one = timedelta(days=1)
 
         if mode == MODE_DAILY:
-            return sum(
-                1
-                for k in range(1, days + 1)
-                if not self._is_holiday(start + timedelta(days=k))
-            )
+            # 总天数 - 窗口内假期天数（合并区间逐段裁剪求交）
+            holiday_days = 0
+            win_start = start + one
+            for s, e in merged:
+                lo = s if s > win_start else win_start
+                hi = e if e < today else today
+                if hi >= lo:
+                    holiday_days += (hi - lo).days + 1
+            return days - holiday_days
 
         if mode == MODE_WEEKLY:
-            slots = 0
-            block_start = start + timedelta(days=7)
-            while block_start <= today:
-                block_days = (block_start + timedelta(days=n) for n in range(7))
-                if any(not self._is_holiday(d) for d in block_days):
-                    slots += 1
-                block_start += timedelta(days=7)
-            return slots
+            # 区块 k = [start+7k, start+7k+6]，k = 1..days//7；整周都是假期才跳过
+            k_max = days // 7
+            covered = 0
+            for s, e in merged:
+                # 完全落在假期内的周：start+7k >= s 且 start+7k+6 <= e
+                # 即 k >= ceil((s-start)/7) 且 k <= floor((e-start-6)/7)
+                lo = max(((s - start).days + 6) // 7, 1)
+                hi = min(((e - start).days - 6) // 7, k_max)
+                if hi >= lo:
+                    covered += hi - lo + 1
+            return k_max - covered
 
-        # workday
+        # workday：非假期每天一档，周六代表整个周末档；周日仅当其周六
+        # 为假期（周六当天被跳过、未计档）且晚于起始日时补一档
         slots = 0
-        cur = start + timedelta(days=1)
+        cur = start + one
         while cur <= today:
-            wd = cur.weekday()
-            if wd < 5:  # 周一至周五
-                if not self._is_holiday(cur):
+            i = bisect_right(merged_starts, cur) - 1
+            if i >= 0 and cur <= merged[i][1]:
+                cur = merged[i][1] + one  # 整段假期跳过
+                continue
+            if cur.weekday() == 6:  # 周日
+                saturday = cur - one
+                if cur > start + one and self._is_holiday(saturday):
                     slots += 1
-            elif wd == 5:  # 周六：与周日合并为一个周末档
-                sunday = cur + timedelta(days=1)
-                if not self._is_holiday(cur) or (
-                    sunday <= today and not self._is_holiday(sunday)
-                ):
-                    slots += 1
-            else:  # 周日：仅当周六早于起始日（起始日即周日）时单独计档
-                saturday = cur - timedelta(days=1)
-                if saturday < start and not self._is_holiday(cur):
-                    slots += 1
-            cur += timedelta(days=1)
+            else:
+                slots += 1
+            cur += one
         return slots
 
     def _group_for_day(self, day: date) -> Optional[tuple]:
@@ -856,13 +927,13 @@ class Plugin(CW2Plugin):
             groups = self._parse_groups(self._coerce_data(data))
 
             start = str(start_date or "").strip()
-            self._start_date = start if DATE_RE.fullmatch(start) else DEFAULT_START_DATE
+            self._set_start_date(start if DATE_RE.fullmatch(start) else DEFAULT_START_DATE)
             self._rotation_mode = (
                 rotation_mode if rotation_mode in VALID_MODES else MODE_WEEKLY
             )
             self._groups = groups
             self._slots_cache.clear()
-            self._holidays_fp = None
+            self._invalidate_holiday_cache()
             logger.info(
                 f"[值日生] 保存成功：{len(groups)} 组, 模式={self._rotation_mode}, "
                 f"起始日期={self._start_date}"
@@ -944,7 +1015,7 @@ class Plugin(CW2Plugin):
             normalized = self._parse_holidays(self._coerce_data(data))
             self._holidays = normalized
             self._slots_cache.clear()
-            self._holidays_fp = None
+            self._invalidate_holiday_cache()
             logger.info(f"[值日生] 假期已保存：{len(normalized)} 个时间段")
             self._persist()
             return True
@@ -1198,7 +1269,8 @@ class Plugin(CW2Plugin):
             holidays = self._parse_holidays(data.get("holidays", []))
 
             start = str(data.get("start_date", "") or "").strip()
-            self._start_date = start if DATE_RE.fullmatch(start) else self._start_date
+            if DATE_RE.fullmatch(start):
+                self._set_start_date(start)
             mode = str(data.get("rotation_mode", "") or "")
             if mode in VALID_MODES:
                 self._rotation_mode = mode
@@ -1207,7 +1279,7 @@ class Plugin(CW2Plugin):
             self._manual_offset = 0
             self._temp_swaps = {}
             self._slots_cache.clear()
-            self._holidays_fp = None
+            self._invalidate_holiday_cache()
 
             logger.info(
                 f"[值日生] 配置已导入：{len(groups)} 组, {len(holidays)} 个假期, "
