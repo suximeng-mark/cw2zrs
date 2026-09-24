@@ -5,7 +5,7 @@ CW2 configs.json 自动修复脚本
       确保值日生插件被正确启用并显示在桌面。
 
 执行的三项修复（均为幂等操作，可重复运行）：
-  1. 将 "com.classwidgets.duty-student" 加入 plugins.enabled
+  1. 将插件 ID（读自 cwplugin.json）加入 plugins.enabled
   2. 将 interactions.hide.state 置为 false（避免部件被默认隐藏）
   3. 在 widgets_presets.default 中加入值日生部件实例
 
@@ -23,18 +23,35 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-PLUGIN_ID = "com.classwidgets.duty-student"
-WIDGET_TYPE_ID = "com.classwidgets.duty-student.widget"
+PLUGIN_ROOT = Path(__file__).resolve().parent
 WIDGET_INSTANCE_ID = "d9f3a2b1-4c5e-6f7a-8b9c-0d1e2f3a4b5c"
 
 # 常见 CW2 安装目录候选（按优先级）
 CANDIDATE_ROOTS = [
-    r"C:\Users\Lenovo\Desktop\吸大鼻溜2\吸大鼻溜2",
-    r"C:\Users\Lenovo\Desktop\吸大鼻溜2",
     os.path.expanduser("~\\Desktop\\ClassWidgets"),
     os.path.expanduser("~\\Desktop\\ClassWidgets 2"),
     os.getcwd(),
 ]
+
+
+def _load_plugin_ids() -> tuple[str, str]:
+    """从同目录 cwplugin.json 读取插件 ID，避免与主插件定义漂移。
+
+    返回 (插件ID, 部件类型ID)；读取失败时回退到当前清单值。
+    """
+    fallback = ("com.studentondutyshow.com", "com.studentondutyshow.com.widget")
+    try:
+        with (PLUGIN_ROOT / "cwplugin.json").open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        pid = str(manifest.get("id", "")).strip()
+        if pid:
+            return pid, f"{pid}.widget"
+    except (OSError, json.JSONDecodeError):
+        pass
+    return fallback
+
+
+PLUGIN_ID, WIDGET_TYPE_ID = _load_plugin_ids()
 
 
 def find_config_path(explicit: str | None = None) -> Path | None:

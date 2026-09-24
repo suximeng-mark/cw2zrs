@@ -51,6 +51,9 @@ REMINDER_DEFAULT_TIME = "07:30"
 REMINDER_DURATION_MS = 8000
 REMINDER_PUSH_LEVEL = 1  # NotificationLevel.ANNOUNCEMENT（避免旧版无枚举导入）
 REMINDER_TIME_RE = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
+# 设定分钟后的宽限窗口（分钟）：轮询若因挂起/休眠/阻塞错过设定分钟，
+# 仍在窗口内则补推；窗口外（如下午才启动）视为过期，不再打扰
+REMINDER_GRACE_MIN = 10
 
 # 姓名与任务的配对样式：paren=姓名（任务）/ dot=姓名·任务 /
 # columns=两列对齐 / taskfirst=任务：姓名
@@ -740,7 +743,7 @@ class Plugin(CW2Plugin):
         return True
 
     def _ensure_today_record(
-        self, today: date, idx: int, auto_idx: int, group: DutyGroup
+        self, today: date, auto_idx: int, group: DutyGroup
     ) -> Dict[str, Any]:
         """确保今日快照存在（纯内存操作，变更时防抖写入独立文件）。
 
@@ -812,7 +815,7 @@ class Plugin(CW2Plugin):
         if found:
             slots, idx, group, auto_idx, is_swap = found
             # 纯内存 + 独立文件防抖写；不调用 config.save()，不触发 configChanged
-            record = self._ensure_today_record(today, idx, auto_idx, group)
+            record = self._ensure_today_record(today, auto_idx, group)
             statuses = (
                 [m["status"] for m in record["members"]]
                 if record["group_name"] == group.name
@@ -1060,7 +1063,12 @@ class Plugin(CW2Plugin):
         return True
 
     def _check_reminder(self) -> None:
-        """20s 轮询：到设定分钟且当天未推送过则发一次（轮询保证该分钟内必命中）。"""
+        """20s 轮询：进入设定时间的宽限窗口且当天未推送过则发一次。
+
+        用「当前时间 >= 设定时间且仍在宽限窗口内」替代精确分钟匹配，
+        避免该分钟内程序被挂起/阻塞导致当天提醒永久丢失；
+        窗口外（如中午才启动程序）视为过期，不补推旧提醒。
+        """
         s = self._settings
         if not s["reminder_enabled"] or self._notifier is None:
             return
@@ -1068,10 +1076,16 @@ class Plugin(CW2Plugin):
         today_iso = now.date().isoformat()
         if self._reminder_fired_date == today_iso:
             return
-        if now.strftime("%H:%M") != s["reminder_time"]:
+        try:
+            hh, mm = s["reminder_time"].split(":")
+            target = now.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        except ValueError:
+            return
+        late_min = (now - target).total_seconds() / 60.0
+        if late_min < 0 or late_min > REMINDER_GRACE_MIN:
             return
         if s["reminder_skip_holiday"] and self._is_holiday(now.date()):
-            # 假期跳过，同样标记当日已处理，避免跨分钟重复检查
+            # 假期跳过，同样标记当日已处理，避免窗口内重复检查
             self._reminder_fired_date = today_iso
             return
         try:
