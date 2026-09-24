@@ -66,9 +66,13 @@ VALID_PAIR_STYLES = (PAIR_PAREN, PAIR_DOT, PAIR_COLUMNS, PAIR_TASKFIRST)
 # 显示/提醒设置默认值（随私有配置一起存放在 data/config.json，不进核心 configs.json）
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "font_group": 12,               # 组名胶囊（底部按钮跟随）
-    "font_meta": 12,                # 周期 / 假期 / 已调换徽标
+    "font_meta": 12,                # 次数 / 假期 / 已调换徽标
     "font_name": 14,                # 成员姓名
     "font_task": 14,                # 任务
+    "show_group": True,             # 组名显示
+    "show_name": True,              # 姓名显示
+    "show_task": True,              # 职责显示
+    "show_meta": True,              # 次数（第N周/轮/天）显示
     "member_layout": LAYOUT_TASK,   # 普通模式成员排列方式
     "pair_style": PAIR_PAREN,       # 姓名与任务的一一对应样式
     "show_tomorrow": False,         # 部件中显示明日值日预告
@@ -76,6 +80,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "reminder_time": REMINDER_DEFAULT_TIME,
     "reminder_skip_holiday": True,  # 假期不提醒
 }
+
+# 工作日轮换的周末处理方式：
+# merge=周六日整体计 1 档（默认） / skip=周末不轮换 / each=周六日逐日计档
+WEEKEND_MERGE = "merge"
+WEEKEND_SKIP = "skip"
+WEEKEND_EACH = "each"
+VALID_WEEKEND_MODES = (WEEKEND_MERGE, WEEKEND_SKIP, WEEKEND_EACH)
 
 # 首次安装时的内置示例分组
 DEFAULT_GROUPS_RAW = [
@@ -150,6 +161,8 @@ class Plugin(CW2Plugin):
         self._start_date: str = DEFAULT_START_DATE
         self._start_day: date = date.fromisoformat(DEFAULT_START_DATE)  # 解析缓存
         self._rotation_mode: str = MODE_WEEKLY
+        # 工作日轮换的周末处理（merge/skip/each），见 VALID_WEEKEND_MODES
+        self._weekend_mode: str = WEEKEND_MERGE
         self._manual_offset: int = 0
         # 临时调班：{date_iso: group_index}，仅覆盖当日自动轮换结果
         self._temp_swaps: Dict[str, int] = {}
@@ -338,6 +351,11 @@ class Plugin(CW2Plugin):
         if pair in VALID_PAIR_STYLES:
             out["pair_style"] = pair
 
+        # 组件显隐（仅接受显式布尔，缺省保留 base 中的值）
+        for key in ("show_group", "show_name", "show_task", "show_meta"):
+            if isinstance(raw.get(key), bool):
+                out[key] = raw[key]
+
         if isinstance(raw.get("show_tomorrow"), bool):
             out["show_tomorrow"] = raw["show_tomorrow"]
         if isinstance(raw.get("reminder_enabled"), bool):
@@ -363,6 +381,9 @@ class Plugin(CW2Plugin):
 
         mode = str(data.get("rotation_mode", "") or "")
         self._rotation_mode = mode if mode in VALID_MODES else MODE_WEEKLY
+
+        wm = str(data.get("weekend_mode", "") or "")
+        self._weekend_mode = wm if wm in VALID_WEEKEND_MODES else WEEKEND_MERGE
 
         try:
             self._manual_offset = int(data.get("manual_offset", 0) or 0)
@@ -410,6 +431,7 @@ class Plugin(CW2Plugin):
             ],
             "start_date": self._start_date,
             "rotation_mode": self._rotation_mode,
+            "weekend_mode": self._weekend_mode,
             "manual_offset": self._manual_offset,
             "temp_swaps": dict(self._temp_swaps),
             "settings": dict(self._settings),
@@ -582,6 +604,7 @@ class Plugin(CW2Plugin):
         fingerprint = (
             self._start_date,
             self._rotation_mode,
+            self._weekend_mode,
             self._holidays_fingerprint(),
             today.isoformat(),
         )
@@ -634,21 +657,36 @@ class Plugin(CW2Plugin):
                     covered += hi - lo + 1
             return k_max - covered
 
-        # workday：非假期每天一档，周六代表整个周末档；周日仅当其周六
-        # 为假期（周六当天被跳过、未计档）且晚于起始日时补一档
+        # workday：非假期每天一档；周末处理由 _weekend_mode 决定
+        # each=周末逐日计档，等价于所有非假期日 +1（与 daily 同公式）
+        if self._weekend_mode == WEEKEND_EACH:
+            holiday_days = 0
+            win_start = start + one
+            for s, e in merged:
+                lo = s if s > win_start else win_start
+                hi = e if e < today else today
+                if hi >= lo:
+                    holiday_days += (hi - lo).days + 1
+            return days - holiday_days
+
         slots = 0
+        count_weekend = self._weekend_mode != WEEKEND_SKIP
         cur = start + one
         while cur <= today:
             i = bisect_right(merged_starts, cur) - 1
             if i >= 0 and cur <= merged[i][1]:
                 cur = merged[i][1] + one  # 整段假期跳过
                 continue
-            if cur.weekday() == 6:  # 周日
-                saturday = cur - one
-                if cur > start + one and self._is_holiday(saturday):
-                    slots += 1
-            else:
+            wd = cur.weekday()
+            if wd < 5:
                 slots += 1
+            elif count_weekend:
+                if wd == 5:
+                    slots += 1  # 周六代表整个周末档
+                else:  # 周日：仅当其周六为假期（周六被跳过、未计档）且晚于起始日时补一档
+                    saturday = cur - one
+                    if cur > start + one and self._is_holiday(saturday):
+                        slots += 1
             cur += one
         return slots
 
@@ -695,6 +733,10 @@ class Plugin(CW2Plugin):
             "fontMeta": s["font_meta"],
             "fontName": s["font_name"],
             "fontTask": s["font_task"],
+            "showGroup": bool(s.get("show_group", True)),
+            "showName": bool(s.get("show_name", True)),
+            "showTask": bool(s.get("show_task", True)),
+            "showMeta": bool(s.get("show_meta", True)),
             "memberLayout": s["member_layout"],
             "pairStyle": s["pair_style"],
             "showTomorrow": s["show_tomorrow"],
@@ -950,14 +992,35 @@ class Plugin(CW2Plugin):
     def get_rotation_mode(self) -> str:
         return self._rotation_mode
 
+    @Slot(result=str)
+    def get_weekend_mode(self) -> str:
+        """工作日轮换的周末处理方式：merge / skip / each。"""
+        return self._weekend_mode
+
+    @Slot(str, result=bool)
+    def save_weekend_mode(self, mode: str) -> bool:
+        mode = str(mode or "").strip()
+        if mode not in VALID_WEEKEND_MODES:
+            logger.error(f"[值日生] 周末处理方式无效：{mode!r}")
+            return False
+        self._weekend_mode = mode
+        self._slots_cache.clear()
+        self._persist()
+        logger.info(f"[值日生] 周末处理方式已保存：{mode}")
+        return True
+
     # --------------------------------------------------------- display
     @Slot(result="QVariant")
     def get_display_settings(self) -> Dict[str, Any]:
         return self._display_payload()
 
-    @Slot(int, int, int, int, str, str, bool, result=bool)
+    @Slot(bool, bool, bool, bool, int, int, int, int, str, str, bool, result=bool)
     def save_display_settings(
         self,
+        show_group: bool,
+        show_name: bool,
+        show_task: bool,
+        show_meta: bool,
         font_group: int,
         font_meta: int,
         font_name: int,
@@ -971,6 +1034,10 @@ class Plugin(CW2Plugin):
         # 以当前值为底（非法枚举回退当前值而非默认值），统一走归一化
         raw = dict(self._settings)
         raw.update({
+            "show_group": bool(show_group),
+            "show_name": bool(show_name),
+            "show_task": bool(show_task),
+            "show_meta": bool(show_meta),
             "font_group": font_group,
             "font_meta": font_meta,
             "font_name": font_name,
@@ -1291,6 +1358,133 @@ class Plugin(CW2Plugin):
             logger.error(f"[值日生] 导入失败: {e}")
             return {"ok": False, "msg": str(e)}
 
+    # ----------------------------------------------------- backup / restore
+    @Slot(str, bool, bool, bool, bool, result="QVariant")
+    def export_backup(
+        self, path: str, include_display: bool, include_people: bool,
+        include_rotation: bool, include_history: bool,
+    ) -> Dict[str, Any]:
+        """按勾选分节导出完整备份（JSON），分节结构见 import_backup。"""
+        try:
+            path = os.path.expanduser(path.strip())
+            if not path:
+                return {"ok": False, "msg": "路径不能为空"}
+
+            sections: Dict[str, Any] = {}
+            if include_display:
+                sections["display"] = dict(self._settings)
+            if include_people:
+                sections["groups"] = self._build_config_payload()["groups"]
+            if include_rotation:
+                sections["rotation"] = {
+                    "start_date": self._start_date,
+                    "rotation_mode": self._rotation_mode,
+                    "weekend_mode": self._weekend_mode,
+                    "holidays": self._build_config_payload()["holidays"],
+                    "temp_swaps": dict(self._temp_swaps),
+                }
+            if include_history:
+                sections["history"] = self._history
+            if not sections:
+                return {"ok": False, "msg": "请至少勾选一项备份内容"}
+
+            payload = {"type": "duty_backup", "version": 1, "sections": sections}
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"[值日生] 备份已导出到 {path}")
+            return {"ok": True, "msg": path}
+        except Exception as e:
+            logger.error(f"[值日生] 备份导出失败: {e}")
+            return {"ok": False, "msg": str(e)}
+
+    @Slot(str, bool, bool, bool, bool, result="QVariant")
+    def import_backup(
+        self, path: str, include_display: bool, include_people: bool,
+        include_rotation: bool, include_history: bool,
+    ) -> Dict[str, Any]:
+        """从备份文件按勾选分节恢复；兼容旧版 export_config 平铺格式。"""
+        try:
+            path = os.path.expanduser(path.strip())
+            if not path or not os.path.isfile(path):
+                return {"ok": False, "msg": "文件不存在"}
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"ok": False, "msg": "格式无效：根对象不是字典"}
+
+            if data.get("type") == "duty_backup" and isinstance(data.get("sections"), dict):
+                sections = data["sections"]
+            else:
+                # 旧版平铺格式：groups/start_date/rotation_mode/holidays
+                sections = {
+                    "groups": data.get("groups"),
+                    "rotation": {
+                        "start_date": data.get("start_date", ""),
+                        "rotation_mode": data.get("rotation_mode", ""),
+                        "holidays": data.get("holidays", []),
+                    },
+                }
+
+            applied: List[str] = []
+            if include_display and isinstance(sections.get("display"), dict):
+                self._settings = self._normalize_settings(
+                    sections["display"], base=self._settings
+                )
+                applied.append("界面设置")
+
+            if include_people and isinstance(sections.get("groups"), list):
+                self._groups = self._parse_groups(sections["groups"])
+                applied.append(f"人员设置（{len(self._groups)} 组）")
+
+            rot = sections.get("rotation")
+            if include_rotation and isinstance(rot, dict):
+                start = str(rot.get("start_date", "") or "").strip()
+                if DATE_RE.fullmatch(start):
+                    self._set_start_date(start)
+                mode = str(rot.get("rotation_mode", "") or "")
+                if mode in VALID_MODES:
+                    self._rotation_mode = mode
+                wm = str(rot.get("weekend_mode", "") or "")
+                if wm in VALID_WEEKEND_MODES:
+                    self._weekend_mode = wm
+                self._holidays = self._parse_holidays(rot.get("holidays", []))
+                swaps: Dict[str, int] = {}
+                raw_swaps = rot.get("temp_swaps")
+                if isinstance(raw_swaps, dict):
+                    for d, gi in raw_swaps.items():
+                        if DATE_RE.fullmatch(str(d)):
+                            try:
+                                swaps[str(d)] = int(gi)
+                            except (ValueError, TypeError):
+                                continue
+                self._temp_swaps = swaps
+                applied.append("轮换配置及方式")
+
+            if include_history and isinstance(sections.get("history"), list):
+                self._history = [
+                    self._sanitize_record(r)
+                    for r in sections["history"]
+                    if self._is_valid_record(r)
+                ]
+                self._trim_history()
+                self._flush_history()
+                applied.append(f"请假记录（{len(self._history)} 天）")
+
+            if not applied:
+                return {"ok": False, "msg": "备份中没有可导入的所选内容"}
+
+            self._slots_cache.clear()
+            self._invalidate_holiday_cache()
+            self._persist()
+            logger.info(f"[值日生] 备份导入完成：{'、'.join(applied)}")
+            return {"ok": True, "msg": "已导入：" + "、".join(applied)}
+        except Exception as e:
+            logger.error(f"[值日生] 备份导入失败: {e}")
+            return {"ok": False, "msg": str(e)}
+
     # ----------------------------------------------------- schedule export
     WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
     MODE_LABELS = {
@@ -1434,6 +1628,46 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
 """
         with open(path, "w", encoding="utf-8") as f:
             f.write(doc)
+
+    @Slot(int, int, result="QVariant")
+    def get_month_info(self, year: int, month: int) -> Dict[str, Any]:
+        """返回覆盖某月的日历数据（前后补齐整周），供设置页月历使用。
+
+        每天含：日期、日号、星期、是否当月/今日、假期名、是否临时调班、
+        当日组名与自动组名（调班时显示对比）。
+        """
+        try:
+            first = date(int(year), int(month), 1)
+        except (ValueError, TypeError):
+            return {"year": 0, "month": 0, "days": []}
+        today = date.today()
+        nxt = date(
+            first.year + (1 if first.month == 12 else 0),
+            1 if first.month == 12 else first.month + 1,
+            1,
+        )
+        last = nxt - timedelta(days=1)
+        grid_start = first - timedelta(days=first.weekday())
+        grid_end = last + timedelta(days=6 - last.weekday())
+
+        days: List[Dict[str, Any]] = []
+        cur = grid_start
+        while cur <= grid_end:
+            found = self._actual_group_for_day(cur)
+            auto_idx = found[3] if found else 0
+            days.append({
+                "date": cur.isoformat(),
+                "day": cur.day,
+                "weekday": cur.weekday(),
+                "inMonth": cur.year == first.year and cur.month == first.month,
+                "isToday": cur == today,
+                "holidayName": self._holiday_name(cur),
+                "groupName": found[2].name if found else "",
+                "autoGroupName": self._groups[auto_idx].name if found else "",
+                "isSwap": bool(found and found[4]),
+            })
+            cur += timedelta(days=1)
+        return {"year": first.year, "month": first.month, "days": days}
 
     @Slot(result="QVariant")
     def get_week_schedule(self) -> Dict[str, Any]:

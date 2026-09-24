@@ -110,7 +110,7 @@ _install_stubs()
 import main as m  # noqa: E402
 
 
-def make_plugin(mode: str, start: str, holidays: list) -> "m.Plugin":
+def make_plugin(mode: str, start: str, holidays: list, weekend_mode: str = "merge") -> "m.Plugin":
     """绕过 __init__ 构造最小可用的 Plugin（仅轮换相关字段）。"""
     p = object.__new__(m.Plugin)
     p._rotation_mode = mode
@@ -123,6 +123,7 @@ def make_plugin(mode: str, start: str, holidays: list) -> "m.Plugin":
     p._manual_offset = 0
     p._groups = []
     p._temp_swaps = {}
+    p._weekend_mode = weekend_mode
     return p
 
 
@@ -137,7 +138,7 @@ def ref_is_holiday(p: "m.Plugin", day: date) -> bool:
 
 
 def ref_compute(p: "m.Plugin", start: date, today: date) -> int:
-    """旧版逐日实现（优化前的代码），作为差分参照。"""
+    """旧版逐日实现（优化前的代码 + 周末处理扩展），作为差分参照。"""
     mode = p._rotation_mode
     days = (today - start).days
     if days <= 0:
@@ -162,24 +163,33 @@ def ref_compute(p: "m.Plugin", start: date, today: date) -> int:
             block_start += timedelta(days=7)
         return slots
 
-    # workday
+    # workday：each=周末逐日计档（等价每天轮换）；skip=周末不计；merge=旧逻辑
+    if p._weekend_mode == m.WEEKEND_EACH:
+        return sum(
+            1
+            for k in range(1, days + 1)
+            if not ref_is_holiday(p, start + timedelta(days=k))
+        )
+
     slots = 0
+    count_weekend = p._weekend_mode != m.WEEKEND_SKIP
     cur = start + timedelta(days=1)
     while cur <= today:
         wd = cur.weekday()
         if wd < 5:
             if not ref_is_holiday(p, cur):
                 slots += 1
-        elif wd == 5:
-            sunday = cur + timedelta(days=1)
-            if not ref_is_holiday(p, cur) or (
-                sunday <= today and not ref_is_holiday(p, sunday)
-            ):
-                slots += 1
-        else:
-            saturday = cur - timedelta(days=1)
-            if saturday < start and not ref_is_holiday(p, cur):
-                slots += 1
+        elif count_weekend:
+            if wd == 5:
+                sunday = cur + timedelta(days=1)
+                if not ref_is_holiday(p, cur) or (
+                    sunday <= today and not ref_is_holiday(p, sunday)
+                ):
+                    slots += 1
+            else:
+                saturday = cur - timedelta(days=1)
+                if saturday < start and not ref_is_holiday(p, cur):
+                    slots += 1
         cur += timedelta(days=1)
     return slots
 
@@ -275,6 +285,7 @@ def test_random_differential(n: int = 2000, seed: int = 42) -> None:
         start = base + timedelta(days=rng.randint(0, 700))
         today = start + timedelta(days=rng.randint(0, 900))
         mode = rng.choice(m.VALID_MODES)
+        wm = rng.choice(m.VALID_WEEKEND_MODES) if mode == m.MODE_WORKDAY else "merge"
         holidays = []
         for _ in range(rng.randint(0, 8)):
             hs = base + timedelta(days=rng.randint(-30, 1600))
@@ -283,8 +294,8 @@ def test_random_differential(n: int = 2000, seed: int = 42) -> None:
                 hs, he = he, hs  # 逆序（解析时会交换）
             holidays.append({"start": hs.isoformat(), "end": he.isoformat(),
                              "name": ""})
-        p = make_plugin(mode, start.isoformat(), holidays)
-        check(f"rand#{i} {mode}",
+        p = make_plugin(mode, start.isoformat(), holidays, wm)
+        check(f"rand#{i} {mode}/{wm}",
               p._compute_elapsed_slots(start, today),
               ref_compute(p, start, today))
 

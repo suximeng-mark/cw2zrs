@@ -25,6 +25,12 @@ Widget {
     function fName()  { return root.duty ? root.duty.fontName  : 14 }
     function fTask()  { return root.duty ? root.duty.fontTask  : 14 }
 
+    // 组件显隐由设置页配置（缺省显示）
+    function showGroup() { return root.duty ? (root.duty.showGroup !== false) : true }
+    function showName()  { return root.duty ? (root.duty.showName !== false) : true }
+    function showTask()  { return root.duty ? (root.duty.showTask !== false) : true }
+    function showMeta()  { return root.duty ? (root.duty.showMeta !== false) : true }
+
     // 高度：普通模式 = 基件余量 + 头部 + 成员区 + 明日预告 + 按钮行；
     // 紧凑模式 = 基件余量 + 三行内容（均随字号变化）
     height: miniMode
@@ -77,8 +83,11 @@ Widget {
     }
 
     function miniWidth() {
-        // 第一行：组名胶囊(+14) + 间距6 + 周期 +（间距6 + 假期徽标(+10)）
-        var top = tmMiniGroup.width + 14 + 6 + tmMiniPeriod.width
+        // 第一行：组名胶囊(+14) + 间距6 + 次数 +（间距6 + 假期徽标(+10)）
+        // 各段按显隐设置累计，全隐藏时仅由成员区决定宽度
+        var top = 0
+        if (root.showGroup()) top += tmMiniGroup.width + 14 + 6
+        if (root.showMeta()) top += tmMiniPeriod.width
         if (root.duty && root.duty.isHoliday)
             top += 6 + tmMiniHoliday.width + 10
         // 成员区：连接符样式合并为一行；两列模式 = 姓名列 + 间距 + 任务列
@@ -144,25 +153,29 @@ Widget {
     }
 
     function dispNameOf(m) {
+        if (!root.showName()) return ""
         var nm = (m.name && m.name.length > 0) ? m.name : qsTr("（未命名）")
         if (m.status === "absent") nm += qsTr("（假）")
         return nm
     }
 
-    // 单个成员的“姓名↔任务”配对文字（连接符样式由 pairStyle 决定）
+    // 单个成员的“姓名↔任务”配对文字（连接符样式由 pairStyle 决定；
+    // 姓名/职责可分别在设置中隐藏，二者皆隐藏时显示占位符）
     function pairLabel(m) {
         var nm = root.dispNameOf(m)
-        var t = (m.task && m.task.length > 0) ? m.task : ""
-        if (!t) return nm
-        switch (root.pairStyle()) {
-        case "dot":
-            return nm + "·" + t
-        case "taskfirst":
-            return t + "：" + nm
-        case "paren":
-        default:
-            return nm + qsTr("（%1）").arg(t)
+        var t = root.showTask() ? ((m.task && m.task.length > 0) ? m.task : "") : ""
+        if (nm && t) {
+            switch (root.pairStyle()) {
+            case "dot":
+                return nm + "·" + t
+            case "taskfirst":
+                return t + "：" + nm
+            case "paren":
+            default:
+                return nm + qsTr("（%1）").arg(t)
+            }
         }
+        return nm || t || "—"
     }
 
     // 连接符样式下，紧凑模式/普通合并一行的整行文本
@@ -197,6 +210,7 @@ Widget {
 
     // 两列对齐模式的行数据：{left, right, isTask}
     // perPerson=true（紧凑模式）：每个成员一行；false 时按岗位布局决定
+    // 姓名/职责显隐在此统一过滤，两侧皆空的行被丢弃
     function columnRows(perPerson) {
         if (!root.duty || !root.duty.members) return []
         var layout = root.duty.memberLayout || "task"
@@ -208,14 +222,14 @@ Widget {
             for (var i = 0; i < ms.length; i++) {
                 var m = ms[i]
                 var nm = root.dispNameOf(m)
-                if (m.task) {
+                if (m.task && root.showTask()) {
                     if (taskIndex[m.task] === undefined) {
                         taskIndex[m.task] = out.length
                         out.push({ left: m.task, right: nm, isTask: true })
-                    } else {
+                    } else if (nm) {
                         out[taskIndex[m.task]].right += "、" + nm
                     }
-                } else {
+                } else if (nm) {
                     out.push({ left: nm, right: "—", isTask: false })
                 }
             }
@@ -225,9 +239,12 @@ Widget {
         var rows = []
         for (var k = 0; k < ms.length; k++) {
             var mm = ms[k]
+            var nm2 = root.dispNameOf(mm)
+            var tk = root.showTask() ? ((mm.task && mm.task.length > 0) ? mm.task : "—") : ""
+            if (!nm2 && !tk) continue
             rows.push({
-                left: root.dispNameOf(mm),
-                right: (mm.task && mm.task.length > 0) ? mm.task : "—",
+                left: nm2 || "—",
+                right: tk,
                 isTask: false
             })
         }
@@ -243,7 +260,9 @@ Widget {
         var ms = root.duty.members
 
         if (layout === "inline") {
-            return [{ inline: true, task: "", names: [root.pairedInlineText()] }]
+            var inlineText = root.pairedInlineText()
+            if (!inlineText) return []
+            return [{ inline: true, task: "", names: [inlineText] }]
         }
 
         var out = []
@@ -253,19 +272,23 @@ Widget {
             if (layout === "person") {
                 // 每人一行，配对写法跟随所选连接符
                 out.push({ inline: true, task: "", names: [root.pairLabel(m)] })
-            } else if (m.task) {
+            } else if (m.task && root.showTask()) {
                 var nm = root.dispNameOf(m)
                 if (taskIndex[m.task] === undefined) {
                     taskIndex[m.task] = out.length
-                    out.push({ inline: false, task: m.task, names: [nm] })
-                } else {
+                    out.push({ inline: false, task: m.task, names: nm ? [nm] : [] })
+                } else if (nm) {
                     out[taskIndex[m.task]].names.push(nm)
                 }
             } else {
-                out.push({ inline: false, task: "", names: [root.dispNameOf(m)] })
+                var nm2 = root.dispNameOf(m)
+                if (nm2) out.push({ inline: false, task: "", names: [nm2] })
             }
         }
-        return out
+        // 过滤空行（姓名职责皆隐藏的成员）
+        return out.filter(function(r) {
+            return r.task !== "" || r.names.length > 0
+        })
     }
 
     function periodText() {
@@ -321,12 +344,13 @@ Widget {
             spacing: 4
             visible: root.miniMode
 
-            // 第一行：组名胶囊 + 周期 + 假期徽标
+            // 第一行：组名胶囊 + 次数 + 假期徽标（显隐由设置控制）
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
 
                 Rectangle {
+                    visible: root.showGroup()
                     Layout.preferredHeight: Math.max(18, miniGroupText.implicitHeight + 8)
                     Layout.preferredWidth: miniGroupText.implicitWidth + 14
                     radius: height / 2
@@ -346,7 +370,7 @@ Widget {
                     text: root.periodText()
                     font.pixelSize: root.fMeta()
                     opacity: 0.55
-                    visible: root.duty
+                    visible: root.duty && root.showMeta()
                 }
 
                 Rectangle {
@@ -452,6 +476,7 @@ Widget {
             visible: !root.miniMode
 
             Rectangle {
+                visible: !root.miniMode && root.showGroup()
                 Layout.preferredHeight: Math.max(22, groupText.implicitHeight + 10)
                 Layout.preferredWidth: groupText.implicitWidth + 22
                 radius: height / 2
@@ -471,6 +496,7 @@ Widget {
                 text: root.periodText()
                 font.pixelSize: root.fMeta()
                 opacity: 0.6
+                visible: root.showMeta()
             }
 
             Rectangle {

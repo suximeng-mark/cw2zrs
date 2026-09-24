@@ -2,6 +2,8 @@ __pycache__/
 *.pyc
 .env
 .venv/
+.workbuddy/
+CHANGELOG.md
 .idea/
 .vscode/
 lib/
