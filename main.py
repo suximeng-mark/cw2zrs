@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from bisect import bisect_left
+from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -145,6 +147,8 @@ class Plugin(CW2Plugin):
         self._start_date: str = DEFAULT_START_DATE
         self._rotation_mode: str = MODE_WEEKLY
         self._manual_offset: int = 0
+        # 临时调班：{date_iso: group_index}，仅覆盖当日自动轮换结果
+        self._temp_swaps: Dict[str, int] = {}
         self._settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
         plugin_dir = Path(__file__).resolve().parent
         self._data_dir = plugin_dir / "data"
@@ -361,7 +365,18 @@ class Plugin(CW2Plugin):
 
         self._holidays = self._parse_holidays(data.get("holidays", []))
         self._settings = self._normalize_settings(data.get("settings", {}))
+        raw_swaps = data.get("temp_swaps")
+        swaps: Dict[str, int] = {}
+        if isinstance(raw_swaps, dict):
+            for d, gi in raw_swaps.items():
+                if DATE_RE.fullmatch(str(d)):
+                    try:
+                        swaps[str(d)] = int(gi)
+                    except (ValueError, TypeError):
+                        continue
+        self._temp_swaps = swaps
         self._slots_cache.clear()
+        self._holidays_fp = None
 
     def _load_config_file(self) -> Optional[Dict[str, Any]]:
         try:
@@ -390,6 +405,7 @@ class Plugin(CW2Plugin):
             "start_date": self._start_date,
             "rotation_mode": self._rotation_mode,
             "manual_offset": self._manual_offset,
+            "temp_swaps": dict(self._temp_swaps),
             "settings": dict(self._settings),
         }
 
@@ -478,6 +494,17 @@ class Plugin(CW2Plugin):
             labels.append(f"{nm}（{m.task}）" if m.task else nm)
         return "、".join(labels) if labels else empty_text
 
+    def _holidays_fingerprint(self) -> tuple:
+        """假期列表的可哈希指纹；变化时缓存自动失效。"""
+        fp = self._holidays_fp
+        if fp is not None:
+            return fp
+        fp = tuple(
+            sorted((h.start, h.end or h.start) for h in self._holidays)
+        )
+        self._holidays_fp = fp
+        return fp
+
     def _elapsed_slots(self, today: Optional[date] = None) -> int:
         """从起始日期到 today（不含首日）经历的轮换次数；假期不推进轮换。
 
@@ -495,20 +522,18 @@ class Plugin(CW2Plugin):
         fingerprint = (
             self._start_date,
             self._rotation_mode,
-            tuple(
-                sorted((h.start, h.end or h.start) for h in self._holidays)
-            ),
+            self._holidays_fingerprint(),
             today.isoformat(),
         )
-        cached = self._slots_cache.get(fingerprint, -1)
-        if cached >= 0:
+        cached = self._slots_cache.get(fingerprint)
+        if cached is not None:
+            self._slots_cache.move_to_end(fingerprint)
             return cached
 
         slots = self._compute_elapsed_slots(start, today)
         self._slots_cache[fingerprint] = slots
         if len(self._slots_cache) > SLOTS_CACHE_LIMIT:
-            for old_key in list(self._slots_cache)[: SLOTS_CACHE_LIMIT // 2]:
-                self._slots_cache.pop(old_key, None)
+            self._slots_cache.popitem(last=False)
         return slots
 
     def _compute_elapsed_slots(self, start: date, today: date) -> int:
@@ -565,6 +590,22 @@ class Plugin(CW2Plugin):
         idx = (slots + self._manual_offset) % len(groups)
         return slots, idx, groups[idx]
 
+    def _actual_group_for_day(self, day: date) -> Optional[tuple]:
+        """含临时调班的当日值日：(slots, idx, group, auto_idx, is_swap)。
+
+        若该日期在 _temp_swaps 中存在合法组下标，则覆盖自动轮换结果；
+        否则回退到 _group_for_day（自动轮换 + 手动偏移）。
+        """
+        groups = self._groups
+        if not groups:
+            return None
+        slots, auto_idx, _ = self._group_for_day(day)
+        iso = day.isoformat()
+        swap_idx = self._temp_swaps.get(iso)
+        if swap_idx is not None and 0 <= swap_idx < len(groups):
+            return slots, swap_idx, groups[swap_idx], auto_idx, True
+        return slots, auto_idx, groups[auto_idx], auto_idx, False
+
     def _persist(self) -> None:
         # 只写插件私有配置文件（小、防抖），完全不触碰核心 configs.json
         self._schedule_config_flush()
@@ -588,10 +629,10 @@ class Plugin(CW2Plugin):
     def _tomorrow_payload(self, today: date, today_idx: int) -> Optional[Dict[str, Any]]:
         """构造明日预告数据（不含考勤状态，明天的记录尚未生成）。"""
         tom = today + timedelta(days=1)
-        found = self._group_for_day(tom)
+        found = self._actual_group_for_day(tom)
         if found is None:
             return None
-        _, idx, group = found
+        _, idx, group, _, _ = found
         holiday = self._holiday_name(tom)
         return {
             "date": tom.isoformat(),
@@ -747,10 +788,10 @@ class Plugin(CW2Plugin):
     def get_today_duty(self) -> Dict[str, Any]:
         today = date.today()
         groups = self._groups
-        found = self._group_for_day(today)
-        auto_idx = (found[0] % len(groups)) if found else 0
+        found = self._actual_group_for_day(today)
         holiday = self._holiday_name(today)  # 今日假期名（空串=非假期），只查一次
 
+        auto_idx = found[3] if found else 0
         result: Dict[str, Any] = {
             "rotationMode": self._rotation_mode,
             "periodNumber": (found[0] + 1) if found else 1,
@@ -769,7 +810,7 @@ class Plugin(CW2Plugin):
         result.update(self._display_payload())
 
         if found:
-            slots, idx, group = found
+            slots, idx, group, auto_idx, is_swap = found
             # 纯内存 + 独立文件防抖写；不调用 config.save()，不触发 configChanged
             record = self._ensure_today_record(today, idx, auto_idx, group)
             statuses = (
@@ -818,6 +859,7 @@ class Plugin(CW2Plugin):
             )
             self._groups = groups
             self._slots_cache.clear()
+            self._holidays_fp = None
             logger.info(
                 f"[值日生] 保存成功：{len(groups)} 组, 模式={self._rotation_mode}, "
                 f"起始日期={self._start_date}"
@@ -899,6 +941,7 @@ class Plugin(CW2Plugin):
             normalized = self._parse_holidays(self._coerce_data(data))
             self._holidays = normalized
             self._slots_cache.clear()
+            self._holidays_fp = None
             logger.info(f"[值日生] 假期已保存：{len(normalized)} 个时间段")
             self._persist()
             return True
@@ -1148,7 +1191,9 @@ class Plugin(CW2Plugin):
             self._groups = groups
             self._holidays = holidays
             self._manual_offset = 0
+            self._temp_swaps = {}
             self._slots_cache.clear()
+            self._holidays_fp = None
 
             logger.info(
                 f"[值日生] 配置已导入：{len(groups)} 组, {len(holidays)} 个假期, "
@@ -1303,6 +1348,71 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
 """
         with open(path, "w", encoding="utf-8") as f:
             f.write(doc)
+
+    @Slot(result="QVariant")
+    def get_week_schedule(self) -> Dict[str, Any]:
+        """返回本周（周一~周日）的值日排班，供设置页周历预览。
+
+        每天含：日期、星期、组名、成员（姓名+任务）、是否假期、假期名、
+        是否临时调班、自动组名（调班时显示对比）。
+        """
+        today = date.today()
+        monday = today - timedelta(days=today.weekday())
+        days: List[Dict[str, Any]] = []
+        for i in range(7):
+            day = monday + timedelta(days=i)
+            found = self._actual_group_for_day(day)
+            holiday = self._holiday_name(day)
+            entry: Dict[str, Any] = {
+                "date": day.isoformat(),
+                "weekday": self.WEEKDAY_CN[i],
+                "isToday": day == today,
+                "isHoliday": bool(holiday),
+                "holidayName": holiday,
+                "isSwap": False,
+                "autoGroupName": "",
+                "groupName": "—",
+                "members": [],
+            }
+            if found is not None:
+                _, idx, group, auto_idx, is_swap = found
+                entry["groupName"] = group.name
+                entry["autoGroupName"] = self._groups[auto_idx].name
+                entry["isSwap"] = is_swap
+                entry["members"] = [
+                    {"name": m.name, "task": m.task}
+                    for m in group.members
+                ]
+            days.append(entry)
+        return {
+            "monday": monday.isoformat(),
+            "sunday": (monday + timedelta(days=6)).isoformat(),
+            "days": days,
+            "totalGroups": len(self._groups),
+            "groupNames": [g.name for g in self._groups],
+        }
+
+    @Slot(str, int, result=bool)
+    def set_temp_swap(self, day: str, group_index: int) -> bool:
+        """设置某日的临时调班：group_index=-1 表示清除该日调班。
+
+        仅覆盖当日自动轮换结果，不影响其他日期与轮换计数。
+        """
+        if not DATE_RE.fullmatch(str(day or "").strip()):
+            return False
+        iso = str(day).strip()
+        n = len(self._groups)
+        if n == 0:
+            return False
+        if group_index < 0:
+            self._temp_swaps.pop(iso, None)
+        else:
+            if group_index >= n:
+                return False
+            self._temp_swaps[iso] = group_index
+        logger.info(f"[值日生] 临时调班：{iso} -> 组{group_index if group_index >= 0 else '(清除)'}")
+        self._persist()
+        return True
 
     @Slot(int, result="QVariant")
     def export_schedule(self, weeks: int) -> Dict[str, Any]:

@@ -10,12 +10,14 @@ PluginPage {
     title: qsTr("值日生设置")
     pluginId: "com.studentondutyshow.com"
 
+    // ===== 数据属性（与后端一一对应）=====
     property var groupsData: []
     property string startDateText: ""
     property string rotationMode: "weekly"
     property var holidaysData: []
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": []}
+    property var weekSchedule: {"monday": "", "sunday": "", "days": [], "groupNames": []}
 
     // 显示设置
     property int fontGroup: 12
@@ -38,6 +40,16 @@ PluginPage {
     property string reminderTime: "07:30"
     property bool reminderSkipHoliday: true
     property bool reminderSupported: true
+
+    // 导航：当前激活页索引
+    property int currentPage: 0
+    property var navItems: [
+        { title: qsTr("界面设置"), icon: "ic_fluent_text_font_size_20_regular" },
+        { title: qsTr("人员管理"), icon: "ic_fluent_people_20_regular" },
+        { title: qsTr("轮换管理"), icon: "ic_fluent_arrow_sync_20_regular" },
+        { title: qsTr("考勤与统计"), icon: "ic_fluent_data_histogram_20_regular" },
+        { title: qsTr("迁移 / 备份"), icon: "ic_fluent_arrow_import_20_regular" }
+    ]
 
     function pairStyleIndex() {
         var i = root.pairStyleValues.indexOf(root.pairStyle)
@@ -85,7 +97,6 @@ PluginPage {
             reminderResultText.text = qsTr("已保存")
             reminderResultText.color = "#2E7D32"
         } else {
-            // 时间格式非法：用后端值回滚界面
             var d = root.backend.get_reminder_settings()
             if (d) {
                 root.reminderEnabled = !!d.enabled
@@ -119,14 +130,20 @@ PluginPage {
         if (!root.backend) return
         root.todayData = root.backend.get_today_duty()
         root.statsData = root.backend.get_stats()
+        root.weekSchedule = root.backend.get_week_schedule()
     }
 
-    // 后端返回的是同一份 JS 对象，本地编辑前先深拷贝，避免反向污染
     function clone(o) {
         return JSON.parse(JSON.stringify(o))
     }
 
-    // 假期增删后统一刷新列表与今日/统计
+    function applyTempSwap(day, groupIndex) {
+        if (!root.backend) return false
+        var ok = root.backend.set_temp_swap(day, groupIndex)
+        if (ok) root.refreshTodayStats()
+        return ok
+    }
+
     function reloadHolidays() {
         root.holidaysData = root.clone(root.backend.get_holidays())
         root.refreshTodayStats()
@@ -174,9 +191,7 @@ PluginPage {
     onBackendChanged: loadData()
     Component.onCompleted: Qt.callLater(loadData)
 
-    function groupAt(gi) {
-        return root.groupsData[gi] || null
-    }
+    function groupAt(gi) { return root.groupsData[gi] || null }
     function memberAt(gi, mi) {
         var g = root.groupsData[gi]
         return (g && g.members && g.members[mi]) ? g.members[mi] : null
@@ -238,66 +253,152 @@ PluginPage {
         }
     }
 
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_arrow_sync_20_regular"
-        title: qsTr("轮换方式")
-        description: qsTr("按周：每周换一组；每天：每日换一组；工作日：周一至周五每天换，周末（六日）仅算 1 日")
+    // ===== 主布局：左侧导航 + 右侧可滚动内容 =====
+    RowLayout {
+        anchors.fill: parent
+        spacing: 0
 
-        RowLayout {
-            spacing: 12
+        // ---------- 左侧导航栏 ----------
+        Rectangle {
+            id: sidebar
+            Layout.preferredWidth: 150
+            Layout.fillHeight: true
+            color: Theme.isDark() ? Qt.alpha("#FFFFFF", 0.04) : Qt.alpha("#000000", 0.03)
 
-            RadioButton {
-                text: qsTr("按周轮换")
-                checked: root.rotationMode === "weekly"
-                onClicked: root.rotationMode = "weekly"
-            }
-            RadioButton {
-                text: qsTr("每天轮换")
-                checked: root.rotationMode === "daily"
-                onClicked: root.rotationMode = "daily"
-            }
-            RadioButton {
-                text: qsTr("工作日轮换")
-                checked: root.rotationMode === "workday"
-                onClicked: root.rotationMode = "workday"
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 4
+
+                Repeater {
+                    model: root.navItems
+
+                    delegate: Rectangle {
+                        required property var modelData
+                        required property int index
+
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 40
+                        radius: 8
+                        color: root.currentPage === index
+                               ? (Theme.isDark() ? Qt.alpha("#FFFFFF", 0.12) : Qt.alpha("#000000", 0.08))
+                               : "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+
+                            Icon {
+                                name: modelData.icon
+                                width: 18
+                                height: 18
+                                color: root.currentPage === index
+                                       ? Colors.proxy.primaryColor
+                                       : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.title
+                                font.pixelSize: 13
+                                font.weight: root.currentPage === index ? Font.DemiBold : Font.Normal
+                                color: root.currentPage === index
+                                       ? Colors.proxy.primaryColor
+                                       : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        TapHandler {
+                            onTapped: root.currentPage = index
+                        }
+                    }
+                }
+
+                Item { Layout.fillHeight: true }
             }
         }
-    }
 
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_calendar_start_20_regular"
-        title: qsTr("轮换起始日期")
-        description: root.rotationMode === "daily"
-                     ? qsTr("从该日期开始计为第 1 天，值日小组每天自动轮换")
-                     : root.rotationMode === "workday"
-                       ? qsTr("从该日期开始，周一至周五每天轮换，周末仅算 1 日")
-                       : qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
+        // 分隔线
+        Rectangle {
+            Layout.preferredWidth: 1
+            Layout.fillHeight: true
+            color: Theme.isDark() ? Qt.alpha("#FFFFFF", 0.1) : Qt.alpha("#000000", 0.08)
+        }
 
-        RowLayout {
-            spacing: 8
+        // ---------- 右侧内容区 ----------
+        Flickable {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            contentWidth: contentColumn.width
+            contentHeight: contentColumn.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
 
-            TextField {
-                id: startField
-                text: root.startDateText
-                placeholderText: "YYYY-MM-DD"
-                onTextChanged: root.startDateText = text
-            }
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-            Button {
-                text: qsTr("设为今天")
-                onClicked: {
-                    var d = new Date()
-                    var m = String(d.getMonth() + 1).padStart(2, "0")
-                    var day = String(d.getDate()).padStart(2, "0")
-                    startField.text = d.getFullYear() + "-" + m + "-" + day
+            ColumnLayout {
+                id: contentColumn
+                width: parent.width
+                spacing: 12
+                leftPadding: 16
+                rightPadding: 16
+                topPadding: 12
+                bottomPadding: 24
+
+                // =====================================================
+                // 页面 0：界面设置
+                // =====================================================
+                Loader {
+                    active: root.currentPage === 0
+                    Layout.fillWidth: true
+                    sourceComponent: interfacePage
+                }
+
+                // =====================================================
+                // 页面 1：人员管理
+                // =====================================================
+                Loader {
+                    active: root.currentPage === 1
+                    Layout.fillWidth: true
+                    sourceComponent: personnelPage
+                }
+
+                // =====================================================
+                // 页面 2：轮换管理
+                // =====================================================
+                Loader {
+                    active: root.currentPage === 2
+                    Layout.fillWidth: true
+                    sourceComponent: rotationPage
+                }
+
+                // =====================================================
+                // 页面 3：考勤与统计
+                // =====================================================
+                Loader {
+                    active: root.currentPage === 3
+                    Layout.fillWidth: true
+                    sourceComponent: attendancePage
+                }
+
+                // =====================================================
+                // 页面 4：迁移 / 备份
+                // =====================================================
+                Loader {
+                    active: root.currentPage === 4
+                    Layout.fillWidth: true
+                    sourceComponent: backupPage
                 }
             }
         }
     }
 
-    // 显示设置中“标签 + 字号滑块 + 像素值”一行；作为 GridLayout 直接子项横跨三列
+    // ============================================================
+    // 公共组件
+    // ============================================================
     component FontSliderRow: RowLayout {
         id: fontRow
         property string labelText: ""
@@ -305,7 +406,6 @@ PluginPage {
         signal sliderMoved(int value)
 
         Layout.fillWidth: true
-        Layout.columnSpan: 3
         spacing: 10
 
         Text {
@@ -330,661 +430,1092 @@ PluginPage {
         }
     }
 
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_text_font_size_20_regular"
-        title: qsTr("显示设置")
-        description: qsTr("四个区域字号独立调节（9~28px），拖动即时预览；成员排列控制普通模式密度，姓名对应控制姓名与任务的配对样式（紧凑/普通均生效）")
+    // “未来 N 周”导出按钮
+    component WeekButton: Button {
+        id: weekBtn
+        property int weeks: 1
+        property bool accent: false
+        property var backend: null
+        signal done(var result)
 
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 10
-
-            GridLayout {
-                Layout.fillWidth: true
-                columns: 3
-                columnSpacing: 10
-                rowSpacing: 2
-
-                FontSliderRow {
-                    labelText: qsTr("组名")
-                    sliderValue: root.fontGroup
-                    onSliderMoved: {
-                        root.fontGroup = value
-                        root.pushDisplaySettings()
-                    }
-                }
-                FontSliderRow {
-                    labelText: qsTr("周期/徽标")
-                    sliderValue: root.fontMeta
-                    onSliderMoved: {
-                        root.fontMeta = value
-                        root.pushDisplaySettings()
-                    }
-                }
-                FontSliderRow {
-                    labelText: qsTr("成员姓名")
-                    sliderValue: root.fontName
-                    onSliderMoved: {
-                        root.fontName = value
-                        root.pushDisplaySettings()
-                    }
-                }
-                FontSliderRow {
-                    labelText: qsTr("任务")
-                    sliderValue: root.fontTask
-                    onSliderMoved: {
-                        root.fontTask = value
-                        root.pushDisplaySettings()
-                    }
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 12
-
-                Label {
-                    text: qsTr("成员排列")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                }
-                RadioButton {
-                    text: qsTr("合并一行")
-                    checked: root.memberLayout === "inline"
-                    onClicked: {
-                        root.memberLayout = "inline"
-                        root.pushDisplaySettings()
-                    }
-                }
-                RadioButton {
-                    text: qsTr("按岗位分行")
-                    checked: root.memberLayout === "task"
-                    onClicked: {
-                        root.memberLayout = "task"
-                        root.pushDisplaySettings()
-                    }
-                }
-                RadioButton {
-                    text: qsTr("每人一行")
-                    checked: root.memberLayout === "person"
-                    onClicked: {
-                        root.memberLayout = "person"
-                        root.pushDisplaySettings()
-                    }
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 12
-
-                Label {
-                    text: qsTr("姓名对应")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                    Layout.preferredWidth: 72
-                }
-                ComboBox {
-                    id: pairCombo
-                    Layout.fillWidth: true
-                    model: root.pairStyleLabels
-                    Component.onCompleted: currentIndex = root.pairStyleIndex()
-                    onActivated: {
-                        root.pairStyle = root.pairStyleValues[index]
-                        root.pushDisplaySettings()
-                    }
-                }
-            }
-
-            Switch {
-                text: qsTr("在部件中显示明日值日预告（紧凑 / 普通模式均生效）")
-                checked: root.showTomorrow
-                enabled: !!root.backend
-                onToggled: {
-                    root.showTomorrow = checked
-                    root.pushDisplaySettings()
-                }
-            }
+        highlighted: weekBtn.accent
+        text: qsTr("未来 %1 周").arg(weekBtn.weeks)
+        onClicked: {
+            if (weekBtn.backend)
+                weekBtn.done(weekBtn.backend.export_schedule(weekBtn.weeks))
         }
     }
 
-    SettingCard {
+    // 通用保存结果文本
+    component ResultText: Text {
         Layout.fillWidth: true
-        icon.name: "ic_fluent_alert_20_regular"
-        title: qsTr("值日提醒")
-        description: qsTr("每天指定时间弹出系统通知，提醒今日值日生（含成员与任务）；需保持 Class Widgets 2 处于运行状态")
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            Switch {
-                text: qsTr("启用每日提醒")
-                checked: root.reminderEnabled
-                enabled: root.reminderSupported
-                onToggled: {
-                    root.reminderEnabled = checked
-                    root.pushReminderSettings()
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 10
-                enabled: root.reminderSupported
-
-                Label {
-                    text: qsTr("提醒时间")
-                    opacity: 0.7
-                    font.pixelSize: 12
-                }
-
-                TextField {
-                    id: reminderTimeField
-                    Layout.preferredWidth: 92
-                    text: root.reminderTime
-                    placeholderText: "07:30"
-                    horizontalAlignment: Text.AlignHCenter
-                    onEditingFinished: {
-                        root.reminderTime = text.trim()
-                        root.pushReminderSettings()
-                    }
-                }
-
-                CheckBox {
-                    text: qsTr("假期不提醒")
-                    checked: root.reminderSkipHoliday
-                    onToggled: {
-                        root.reminderSkipHoliday = checked
-                        root.pushReminderSettings()
-                    }
-                }
-
-                Item { Layout.fillWidth: true }
-
-                Button {
-                    text: qsTr("立即测试提醒")
-                    onClicked: root.testReminder()
-                }
-            }
-
-            Text {
-                Layout.fillWidth: true
-                visible: !root.reminderSupported
-                text: qsTr("当前 Class Widgets 版本不支持系统通知，更新到新版后即可使用值日提醒")
-                color: "#E5594F"
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-            }
-
-            Text {
-                id: reminderResultText
-                Layout.fillWidth: true
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-                visible: text.length > 0
-            }
-        }
+        font.pixelSize: 12
+        wrapMode: Text.WordWrap
+        visible: text.length > 0
     }
 
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_calendar_cancel_20_regular"
-        title: qsTr("假期安排")
-        description: qsTr("假期内不轮换（寒暑假、法定节假日等），假期结束后自动衔接下一组；结束日期留空则按单日计算")
-
+    // ============================================================
+    // 页面 0：界面设置
+    // ============================================================
+    Component {
+        id: interfacePage
         ColumnLayout {
+            spacing: 12
             Layout.fillWidth: true
-            spacing: 8
 
-            RowLayout {
+            SettingCard {
                 Layout.fillWidth: true
-                spacing: 8
+                icon.name: "ic_fluent_text_font_size_20_regular"
+                title: qsTr("字号设置")
+                description: qsTr("四个区域字号独立调节（9~28px），拖动即时预览")
 
-                TextField {
-                    id: holidayStartField
-                    Layout.preferredWidth: 120
-                    placeholderText: qsTr("开始 YYYY-MM-DD")
-                }
-                Text { text: "~"; opacity: 0.6 }
-                TextField {
-                    id: holidayEndField
-                    Layout.preferredWidth: 120
-                    placeholderText: qsTr("结束（可空）")
-                }
-                TextField {
-                    id: holidayNameField
+                ColumnLayout {
                     Layout.fillWidth: true
-                    placeholderText: qsTr("假期名称（可选，如：国庆）")
-                    onAccepted: root.addHolidayBtn.clicked()
+                    spacing: 10
+
+                    FontSliderRow {
+                        labelText: qsTr("组名")
+                        sliderValue: root.fontGroup
+                        onSliderMoved: { root.fontGroup = value; root.pushDisplaySettings() }
+                    }
+                    FontSliderRow {
+                        labelText: qsTr("周期/徽标")
+                        sliderValue: root.fontMeta
+                        onSliderMoved: { root.fontMeta = value; root.pushDisplaySettings() }
+                    }
+                    FontSliderRow {
+                        labelText: qsTr("成员姓名")
+                        sliderValue: root.fontName
+                        onSliderMoved: { root.fontName = value; root.pushDisplaySettings() }
+                    }
+                    FontSliderRow {
+                        labelText: qsTr("任务")
+                        sliderValue: root.fontTask
+                        onSliderMoved: { root.fontTask = value; root.pushDisplaySettings() }
+                    }
                 }
-                Button {
-                    id: addHolidayBtn
-                    text: qsTr("添加假期")
-                    highlighted: true
-                    onClicked: {
-                        var ok = root.addHoliday(
-                            holidayStartField.text.trim(),
-                            holidayEndField.text.trim(),
-                            holidayNameField.text.trim()
-                        )
-                        if (ok) {
-                            holidayStartField.text = ""
-                            holidayEndField.text = ""
-                            holidayNameField.text = ""
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_people_20_regular"
+                title: qsTr("排列与配对")
+                description: qsTr("成员排列控制普通模式密度；姓名对应控制姓名与任务的配对样式（紧凑/普通均生效）")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+
+                        Label { text: qsTr("成员排列"); opacity: 0.7; font.pixelSize: 12; Layout.preferredWidth: 72 }
+                        RadioButton {
+                            text: qsTr("合并一行")
+                            checked: root.memberLayout === "inline"
+                            onClicked: { root.memberLayout = "inline"; root.pushDisplaySettings() }
+                        }
+                        RadioButton {
+                            text: qsTr("按岗位分行")
+                            checked: root.memberLayout === "task"
+                            onClicked: { root.memberLayout = "task"; root.pushDisplaySettings() }
+                        }
+                        RadioButton {
+                            text: qsTr("每人一行")
+                            checked: root.memberLayout === "person"
+                            onClicked: { root.memberLayout = "person"; root.pushDisplaySettings() }
                         }
                     }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+
+                        Label { text: qsTr("姓名对应"); opacity: 0.7; font.pixelSize: 12; Layout.preferredWidth: 72 }
+                        ComboBox {
+                            id: pairCombo
+                            Layout.fillWidth: true
+                            model: root.pairStyleLabels
+                            Component.onCompleted: currentIndex = root.pairStyleIndex()
+                            onActivated: {
+                                root.pairStyle = root.pairStyleValues[index]
+                                root.pushDisplaySettings()
+                            }
+                        }
+                    }
+
+                    Switch {
+                        text: qsTr("在部件中显示明日值日预告（紧凑 / 普通模式均生效）")
+                        checked: root.showTomorrow
+                        enabled: !!root.backend
+                        onToggled: { root.showTomorrow = checked; root.pushDisplaySettings() }
+                    }
                 }
             }
 
-            Repeater {
-                model: root.holidaysData
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_alert_20_regular"
+                title: qsTr("值日提醒")
+                description: qsTr("每天指定时间弹出系统通知，提醒今日值日生；需保持 Class Widgets 2 处于运行状态")
 
-                delegate: RowLayout {
-                    required property var modelData
-                    required property int index
-
+                ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 8
 
-                    Rectangle {
-                        Layout.preferredHeight: 22
-                        Layout.preferredWidth: holidayTagText.implicitWidth + 16
-                        radius: 11
-                        color: Theme.isDark() ? Qt.alpha("#FFFFFF", 0.1) : Qt.alpha("#000000", 0.06)
+                    Switch {
+                        text: qsTr("启用每日提醒")
+                        checked: root.reminderEnabled
+                        enabled: root.reminderSupported
+                        onToggled: { root.reminderEnabled = checked; root.pushReminderSettings() }
+                    }
 
-                        Text {
-                            id: holidayTagText
-                            anchors.centerIn: parent
-                            text: qsTr("假期")
-                            font.pixelSize: 11
-                            color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        enabled: root.reminderSupported
+
+                        Label { text: qsTr("提醒时间"); opacity: 0.7; font.pixelSize: 12 }
+                        TextField {
+                            id: reminderTimeField
+                            Layout.preferredWidth: 92
+                            text: root.reminderTime
+                            placeholderText: "07:30"
+                            horizontalAlignment: Text.AlignHCenter
+                            onEditingFinished: {
+                                root.reminderTime = text.trim()
+                                root.pushReminderSettings()
+                            }
+                        }
+                        CheckBox {
+                            text: qsTr("假期不提醒")
+                            checked: root.reminderSkipHoliday
+                            onToggled: { root.reminderSkipHoliday = checked; root.pushReminderSettings() }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Button {
+                            text: qsTr("立即测试提醒")
+                            onClicked: root.testReminder()
                         }
                     }
 
                     Text {
-                        text: modelData.start === modelData.end
-                              ? modelData.start
-                              : modelData.start + " ~ " + modelData.end
-                        font.pixelSize: 13
-                    }
-                    Text {
-                        text: modelData.name ? "· " + modelData.name : ""
+                        Layout.fillWidth: true
+                        visible: !root.reminderSupported
+                        text: qsTr("当前 Class Widgets 版本不支持系统通知，更新到新版后即可使用值日提醒")
+                        color: "#E5594F"
                         font.pixelSize: 12
-                        opacity: 0.6
+                        wrapMode: Text.WordWrap
                     }
 
-                    Item { Layout.fillWidth: true }
-
-                    Button {
-                        text: qsTr("删除")
-                        onClicked: root.removeHoliday(index)
-                    }
+                    ResultText { id: reminderResultText }
                 }
             }
         }
     }
 
-    Repeater {
-        model: root.groupsData
-
-        delegate: Frame {
-            id: groupDelegate
-            required property var modelData
-            required property int index
-
+    // ============================================================
+    // 页面 1：人员管理
+    // ============================================================
+    Component {
+        id: personnelPage
+        ColumnLayout {
+            spacing: 12
             Layout.fillWidth: true
-            topPadding: 14
-            bottomPadding: 14
-            leftPadding: 16
-            rightPadding: 16
 
-            ColumnLayout {
-                anchors.fill: parent
-                spacing: 8
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_people_20_regular"
+                title: qsTr("分组与成员")
+                description: qsTr("点击组名可编辑；每行一个成员，姓名与任务分别填写")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+
+                    Repeater {
+                        model: root.groupsData
+
+                        delegate: Frame {
+                            id: groupDelegate
+                            required property var modelData
+                            required property int index
+
+                            Layout.fillWidth: true
+                            topPadding: 14
+                            bottomPadding: 14
+                            leftPadding: 16
+                            rightPadding: 16
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 8
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Text {
+                                        text: qsTr("第 %1 组").arg(groupDelegate.index + 1)
+                                        typography: Typography.BodyStrong
+                                    }
+
+                                    TextField {
+                                        Layout.preferredWidth: 160
+                                        placeholderText: qsTr("组名")
+                                        text: root.groupAt(groupDelegate.index) ? root.groupAt(groupDelegate.index).name : ""
+                                        onTextChanged: {
+                                            var g = root.groupAt(groupDelegate.index)
+                                            if (g) g.name = text
+                                        }
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Button {
+                                        text: qsTr("删除该组")
+                                        onClicked: root.removeGroup(groupDelegate.index)
+                                    }
+                                }
+
+                                Repeater {
+                                    model: groupDelegate.modelData.members
+
+                                    delegate: RowLayout {
+                                        required property int index
+
+                                        Layout.fillWidth: true
+                                        spacing: 8
+
+                                        TextField {
+                                            Layout.fillWidth: true
+                                            placeholderText: qsTr("姓名")
+                                            text: {
+                                                var m = root.memberAt(groupDelegate.index, index)
+                                                return m ? m.name : ""
+                                            }
+                                            onTextChanged: {
+                                                var m = root.memberAt(groupDelegate.index, index)
+                                                if (m) m.name = text
+                                            }
+                                        }
+
+                                        TextField {
+                                            Layout.fillWidth: true
+                                            placeholderText: qsTr("任务，如：扫地")
+                                            text: {
+                                                var m = root.memberAt(groupDelegate.index, index)
+                                                return m ? m.task : ""
+                                            }
+                                            onTextChanged: {
+                                                var m = root.memberAt(groupDelegate.index, index)
+                                                if (m) m.task = text
+                                            }
+                                        }
+
+                                        Button {
+                                            text: qsTr("删除")
+                                            onClicked: root.removeMember(groupDelegate.index, index)
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Button {
+                                        text: qsTr("+ 添加成员")
+                                        onClicked: root.addMember(groupDelegate.index)
+                                    }
+
+                                    Button {
+                                        text: qsTr("批量导入")
+                                        onClicked: importPopup.open()
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+                                }
+
+                                Popup {
+                                    id: importPopup
+                                    parent: Overlay.overlay
+                                    anchors.centerIn: parent
+                                    modal: true
+                                    focus: true
+                                    width: 420
+                                    padding: 20
+                                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        spacing: 10
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: qsTr("批量导入成员")
+                                            font.bold: true
+                                            font.pixelSize: 16
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: qsTr("每行一个成员。格式：\n  姓名 任务\n  姓名,任务\n  姓名（仅姓名）")
+                                            color: "#888"
+                                            font.pixelSize: 12
+                                            wrapMode: Text.WordWrap
+                                        }
+
+                                        TextArea {
+                                            id: importArea
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 160
+                                            placeholderText: qsTr("张三 扫地\n李四,擦黑板\n王五")
+                                            wrapMode: TextArea.Wrap
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+
+                                            Item { Layout.fillWidth: true }
+
+                                            Button {
+                                                text: qsTr("取消")
+                                                onClicked: importPopup.close()
+                                            }
+
+                                            Button {
+                                                text: qsTr("导入")
+                                                highlighted: true
+                                                onClicked: {
+                                                    root.importMembers(groupDelegate.index, importArea.text)
+                                                    importArea.text = ""
+                                                    importPopup.close()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Button {
+                        Layout.fillWidth: true
+                        text: qsTr("+ 添加分组")
+                        onClicked: root.addGroup()
+                    }
+                }
+            }
+
+            Button {
+                Layout.fillWidth: true
+                text: qsTr("保存人员设置")
+                highlighted: true
+                onClicked: {
+                    root.doSave()
+                    root.refreshTodayStats()
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // 页面 2：轮换管理
+    // ============================================================
+    Component {
+        id: rotationPage
+        ColumnLayout {
+            spacing: 12
+            Layout.fillWidth: true
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_arrow_sync_20_regular"
+                title: qsTr("轮换方式")
+                description: qsTr("按周：每周换一组；每天：每日换一组；工作日：周一至周五每天换，周末（六日）仅算 1 日")
 
                 RowLayout {
+                    spacing: 12
+
+                    RadioButton {
+                        text: qsTr("按周轮换")
+                        checked: root.rotationMode === "weekly"
+                        onClicked: root.rotationMode = "weekly"
+                    }
+                    RadioButton {
+                        text: qsTr("每天轮换")
+                        checked: root.rotationMode === "daily"
+                        onClicked: root.rotationMode = "daily"
+                    }
+                    RadioButton {
+                        text: qsTr("工作日轮换")
+                        checked: root.rotationMode === "workday"
+                        onClicked: root.rotationMode = "workday"
+                    }
+                }
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_calendar_start_20_regular"
+                title: qsTr("轮换起始日期")
+                description: root.rotationMode === "daily"
+                             ? qsTr("从该日期开始计为第 1 天，值日小组每天自动轮换")
+                             : root.rotationMode === "workday"
+                               ? qsTr("从该日期开始，周一至周五每天轮换，周末仅算 1 日")
+                               : qsTr("从该日期所在的一周开始计为第 1 周，值日小组按周自动轮换")
+
+                RowLayout {
+                    spacing: 8
+
+                    TextField {
+                        id: startField
+                        text: root.startDateText
+                        placeholderText: "YYYY-MM-DD"
+                        onTextChanged: root.startDateText = text
+                    }
+
+                    Button {
+                        text: qsTr("设为今天")
+                        onClicked: {
+                            var d = new Date()
+                            var m = String(d.getMonth() + 1).padStart(2, "0")
+                            var day = String(d.getDate()).padStart(2, "0")
+                            startField.text = d.getFullYear() + "-" + m + "-" + day
+                        }
+                    }
+                }
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_calendar_cancel_20_regular"
+                title: qsTr("假期安排")
+                description: qsTr("假期内不轮换（寒暑假、法定节假日等），假期结束后自动衔接下一组；结束日期留空则按单日计算")
+
+                ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 8
 
-                    Text {
-                        text: qsTr("第 %1 组").arg(groupDelegate.index + 1)
-                        typography: Typography.BodyStrong
-                    }
-
-                    TextField {
-                        Layout.preferredWidth: 160
-                        placeholderText: qsTr("组名")
-                        text: root.groupAt(groupDelegate.index) ? root.groupAt(groupDelegate.index).name : ""
-                        onTextChanged: {
-                            var g = root.groupAt(groupDelegate.index)
-                            if (g) g.name = text
-                        }
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Button {
-                        text: qsTr("删除该组")
-                        onClicked: root.removeGroup(groupDelegate.index)
-                    }
-                }
-
-                Repeater {
-                    model: groupDelegate.modelData.members
-
-                    delegate: RowLayout {
-                        required property int index
-
+                    RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
 
                         TextField {
-                            Layout.fillWidth: true
-                            placeholderText: qsTr("姓名")
-                            text: {
-                                var m = root.memberAt(groupDelegate.index, index)
-                                return m ? m.name : ""
-                            }
-                            onTextChanged: {
-                                var m = root.memberAt(groupDelegate.index, index)
-                                if (m) m.name = text
-                            }
+                            id: holidayStartField
+                            Layout.preferredWidth: 120
+                            placeholderText: qsTr("开始 YYYY-MM-DD")
                         }
-
+                        Text { text: "~"; opacity: 0.6 }
                         TextField {
-                            Layout.fillWidth: true
-                            placeholderText: qsTr("任务，如：扫地")
-                            text: {
-                                var m = root.memberAt(groupDelegate.index, index)
-                                return m ? m.task : ""
-                            }
-                            onTextChanged: {
-                                var m = root.memberAt(groupDelegate.index, index)
-                                if (m) m.task = text
-                            }
+                            id: holidayEndField
+                            Layout.preferredWidth: 120
+                            placeholderText: qsTr("结束（可空）")
                         }
-
+                        TextField {
+                            id: holidayNameField
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("假期名称（可选，如：国庆）")
+                            onAccepted: addHolidayBtn.clicked()
+                        }
                         Button {
-                            text: qsTr("删除")
-                            onClicked: root.removeMember(groupDelegate.index, index)
+                            id: addHolidayBtn
+                            text: qsTr("添加假期")
+                            highlighted: true
+                            onClicked: {
+                                var ok = root.addHoliday(
+                                    holidayStartField.text.trim(),
+                                    holidayEndField.text.trim(),
+                                    holidayNameField.text.trim()
+                                )
+                                if (ok) {
+                                    holidayStartField.text = ""
+                                    holidayEndField.text = ""
+                                    holidayNameField.text = ""
+                                }
+                            }
                         }
                     }
-                }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
+                    Repeater {
+                        model: root.holidaysData
 
-                    Button {
-                        text: qsTr("+ 添加成员")
-                        onClicked: root.addMember(groupDelegate.index)
-                    }
+                        delegate: RowLayout {
+                            required property var modelData
+                            required property int index
 
-                    Button {
-                        text: qsTr("批量导入")
-                        onClicked: importPopup.open()
-                    }
-
-                    Item { Layout.fillWidth: true }
-                }
-
-                Popup {
-                    id: importPopup
-                    parent: Overlay.overlay
-                    anchors.centerIn: parent
-                    modal: true
-                    focus: true
-                    width: 420
-                    padding: 20
-                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 10
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: qsTr("批量导入成员")
-                            font.bold: true
-                            font.pixelSize: 16
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: qsTr("每行一个成员。格式：\n  姓名 任务\n  姓名,任务\n  姓名（仅姓名）")
-                            color: "#888"
-                            font.pixelSize: 12
-                            wrapMode: Text.WordWrap
-                        }
-
-                        TextArea {
-                            id: importArea
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 160
-                            placeholderText: qsTr("张三 扫地\n李四,擦黑板\n王五")
-                            wrapMode: TextArea.Wrap
-                        }
-
-                        RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
+
+                            Rectangle {
+                                Layout.preferredHeight: 22
+                                Layout.preferredWidth: holidayTagText.implicitWidth + 16
+                                radius: 11
+                                color: Theme.isDark() ? Qt.alpha("#FFFFFF", 0.1) : Qt.alpha("#000000", 0.06)
+
+                                Text {
+                                    id: holidayTagText
+                                    anchors.centerIn: parent
+                                    text: qsTr("假期")
+                                    font.pixelSize: 11
+                                    color: Theme.isDark() ? "#FFFFFF" : "#1B1B1F"
+                                }
+                            }
+
+                            Text {
+                                text: modelData.start === modelData.end
+                                      ? modelData.start
+                                      : modelData.start + " ~ " + modelData.end
+                                font.pixelSize: 13
+                            }
+                            Text {
+                                text: modelData.name ? "· " + modelData.name : ""
+                                font.pixelSize: 12
+                                opacity: 0.6
+                            }
 
                             Item { Layout.fillWidth: true }
 
                             Button {
-                                text: qsTr("取消")
-                                onClicked: importPopup.close()
+                                text: qsTr("删除")
+                                onClicked: root.removeHoliday(index)
                             }
+                        }
+                    }
+                }
+            }
 
-                            Button {
-                                text: qsTr("导入")
-                                highlighted: true
-                                onClicked: {
-                                    root.importMembers(groupDelegate.index, importArea.text)
-                                    importArea.text = ""
-                                    importPopup.close()
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_calendar_start_20_regular"
+                title: qsTr("本周值日预览")
+                description: root.weekSchedule && root.weekSchedule.monday
+                             ? root.weekSchedule.monday + " ~ " + root.weekSchedule.sunday
+                             : qsTr("周一至周日排班一览；临时调班的日期会高亮标记")
+
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 7
+                    rowSpacing: 6
+                    columnSpacing: 6
+
+                    Repeater {
+                        model: root.weekSchedule ? root.weekSchedule.days : []
+
+                        delegate: Rectangle {
+                            required property var modelData
+
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 96
+                            radius: 8
+                            color: modelData.isToday
+                                   ? (Theme.isDark() ? Qt.alpha(Colors.proxy.primaryColor, 0.25) : Qt.alpha(Colors.proxy.primaryColor, 0.12))
+                                   : modelData.isHoliday
+                                     ? (Theme.isDark() ? Qt.alpha("#FFFFFF", 0.04) : "#FFF5DC")
+                                     : (Theme.isDark() ? Qt.alpha("#FFFFFF", 0.06) : Qt.alpha("#000000", 0.03))
+                            border.width: modelData.isSwap ? 1 : 0
+                            border.color: "#E5A100"
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 6
+                                spacing: 2
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+
+                                    Text {
+                                        text: modelData.weekday
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                        color: modelData.isToday ? Colors.proxy.primaryColor : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                                    }
+                                    Text {
+                                        text: modelData.date.slice(5)
+                                        font.pixelSize: 10
+                                        opacity: 0.6
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Text {
+                                        visible: modelData.isSwap
+                                        text: qsTr("调")
+                                        font.pixelSize: 10
+                                        font.bold: true
+                                        color: "#FFFFFF"
+                                    }
+                                    Rectangle {
+                                        visible: modelData.isSwap
+                                        width: 16; height: 16; radius: 8
+                                        color: "#E5A100"
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        z: -1
+                                    }
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.isHoliday
+                                          ? (modelData.holidayName || qsTr("假期"))
+                                          : modelData.groupName
+                                    font.pixelSize: 12
+                                    font.bold: !modelData.isHoliday
+                                    color: modelData.isHoliday ? "#B8860B" : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                                    elide: Text.ElideRight
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    text: {
+                                        if (modelData.isHoliday) return ""
+                                        var names = []
+                                        for (var i = 0; i < modelData.members.length; i++)
+                                            names.push(modelData.members[i].name)
+                                        return names.join("、")
+                                    }
+                                    font.pixelSize: 10
+                                    opacity: 0.7
+                                    wrapMode: Text.WordWrap
+                                    elide: Text.ElideRight
+                                    maximumLineCount: 2
+                                }
+
+                                Text {
+                                    visible: modelData.isSwap && modelData.autoGroupName
+                                    Layout.fillWidth: true
+                                    text: qsTr("原:") + modelData.autoGroupName
+                                    font.pixelSize: 9
+                                    color: "#E5A100"
+                                    elide: Text.ElideRight
                                 }
                             }
                         }
                     }
                 }
             }
-        }
-    }
 
-    Button {
-        Layout.fillWidth: true
-        text: qsTr("+ 添加分组")
-        onClicked: root.addGroup()
-    }
-
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_person_prohibited_20_regular"
-        title: qsTr("今日考勤")
-        description: root.todayData
-                     ? root.todayData.date + " · " + root.todayData.groupName
-                       + (root.todayData.isHoliday ? " · " + (root.todayData.holidayName || qsTr("假期中")) : "")
-                       + (root.todayData.switched ? " · " + qsTr("已手动调换") : "")
-                     : qsTr("暂无数据")
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 6
-
-            Repeater {
-                model: root.todayData ? root.todayData.members : []
-
-                delegate: RowLayout {
-                    required property var modelData
-                    required property int index
-
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    Text {
-                        text: (modelData.name && modelData.name.length > 0)
-                              ? modelData.name : qsTr("（未命名）")
-                        font.pixelSize: 14
-                        font.strikeout: modelData.status === "absent"
-                        opacity: modelData.status === "absent" ? 0.5 : 1.0
-                    }
-                    Text {
-                        text: modelData.task ? "· " + modelData.task : ""
-                        font.pixelSize: 12
-                        opacity: 0.55
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Button {
-                        text: modelData.status === "absent"
-                              ? qsTr("恢复正常") : qsTr("标记请假")
-                        highlighted: modelData.status !== "absent"
-                        onClicked: root.toggleMemberStatus(index)
-                    }
-                }
-            }
-
-            Text {
-                visible: !root.todayData || !root.todayData.members || root.todayData.members.length === 0
-                text: qsTr("今日没有值日成员")
-                opacity: 0.55
-                font.pixelSize: 12
-            }
-        }
-    }
-
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_data_histogram_20_regular"
-        title: qsTr("值日统计")
-        description: qsTr("自动记录每日值日，手动换组会标记为“调换”")
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 6
-
-            RowLayout {
+            SettingCard {
                 Layout.fillWidth: true
-                spacing: 8
+                icon.name: "ic_fluent_arrow_sync_20_regular"
+                title: qsTr("临时调班")
+                description: qsTr("指定某一天由哪个小组值日，仅覆盖当日自动轮换结果，不影响其他日期与轮换计数")
 
-                Text {
-                    text: qsTr("已记录 %1 天值日").arg(root.statsData.days)
-                    font.pixelSize: 13
-                    opacity: 0.7
-                }
-
-                Item { Layout.fillWidth: true }
-
-                Button {
-                    text: qsTr("清空记录")
-                    enabled: root.statsData.days > 0
-                    onClicked: clearHistoryPopup.open()
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                visible: root.statsData.rows.length > 0
-
-                Text { text: qsTr("姓名"); Layout.preferredWidth: 120; opacity: 0.5; font.pixelSize: 12 }
-                Text { text: qsTr("值日次数"); Layout.preferredWidth: 80; opacity: 0.5; font.pixelSize: 12 }
-                Text { text: qsTr("请假次数"); Layout.preferredWidth: 80; opacity: 0.5; font.pixelSize: 12 }
-            }
-
-            Repeater {
-                model: root.statsData.rows
-
-                delegate: RowLayout {
-                    required property var modelData
-
+                ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 8
-
-                    Text {
-                        text: modelData.name
-                        Layout.preferredWidth: 120
-                        font.pixelSize: 13
-                    }
-                    Text {
-                        text: modelData.count
-                        Layout.preferredWidth: 80
-                        font.pixelSize: 13
-                    }
-                    Text {
-                        text: modelData.absent
-                        Layout.preferredWidth: 80
-                        font.pixelSize: 13
-                        color: modelData.absent > 0 ? "#E5594F" : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
-                    }
-                }
-            }
-
-            Text {
-                Layout.topMargin: 6
-                text: qsTr("最近记录")
-                font.pixelSize: 13
-                font.bold: true
-                visible: root.statsData.recent.length > 0
-            }
-
-            Repeater {
-                model: root.statsData.recent
-
-                delegate: ColumnLayout {
-                    required property var modelData
-
-                    Layout.fillWidth: true
-                    spacing: 2
+                    spacing: 10
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 6
+                        spacing: 8
+
+                        Label { text: qsTr("日期"); opacity: 0.7; font.pixelSize: 12 }
+                        TextField {
+                            id: swapDateField
+                            Layout.preferredWidth: 130
+                            placeholderText: "YYYY-MM-DD"
+                            text: new Date().toISOString().slice(0, 10)
+                        }
+
+                        Label { text: qsTr("值日组"); opacity: 0.7; font.pixelSize: 12 }
+                        ComboBox {
+                            id: swapGroupCombo
+                            Layout.preferredWidth: 160
+                            model: root.weekSchedule ? root.weekSchedule.groupNames : []
+                        }
+
+                        Button {
+                            text: qsTr("应用调班")
+                            highlighted: true
+                            onClicked: {
+                                var ok = root.applyTempSwap(swapDateField.text.trim(), swapGroupCombo.currentIndex)
+                                swapResultText.text = ok ? qsTr("已设置调班") : qsTr("设置失败：日期格式应为 YYYY-MM-DD")
+                                swapResultText.color = ok ? "#2E7D32" : "#E5594F"
+                            }
+                        }
+
+                        Button {
+                            text: qsTr("清除该日调班")
+                            onClicked: {
+                                var ok = root.applyTempSwap(swapDateField.text.trim(), -1)
+                                swapResultText.text = ok ? qsTr("已清除调班") : qsTr("清除失败")
+                                swapResultText.color = ok ? "#2E7D32" : "#E5594F"
+                            }
+                        }
+                    }
+
+                    ResultText { id: swapResultText }
+                }
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_table_20_regular"
+                title: qsTr("值日表导出")
+                description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记），同时导出 CSV 和 HTML 到桌面")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        WeekButton {
+                            weeks: 2
+                            backend: root.backend
+                            onDone: { scheduleResultText.text = result.msg; scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                        }
+                        WeekButton {
+                            weeks: 4
+                            accent: true
+                            backend: root.backend
+                            onDone: { scheduleResultText.text = result.msg; scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                        }
+                        WeekButton {
+                            weeks: 8
+                            backend: root.backend
+                            onDone: { scheduleResultText.text = result.msg; scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    ResultText { id: scheduleResultText }
+                }
+            }
+
+            Button {
+                Layout.fillWidth: true
+                text: qsTr("保存轮换设置")
+                highlighted: true
+                onClicked: {
+                    root.doSave()
+                    root.refreshTodayStats()
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // 页面 3：考勤与统计
+    // ============================================================
+    Component {
+        id: attendancePage
+        ColumnLayout {
+            spacing: 12
+            Layout.fillWidth: true
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_person_prohibited_20_regular"
+                title: qsTr("今日考勤")
+                description: root.todayData
+                             ? root.todayData.date + " · " + root.todayData.groupName
+                               + (root.todayData.isHoliday ? " · " + (root.todayData.holidayName || qsTr("假期中")) : "")
+                               + (root.todayData.switched ? " · " + qsTr("已手动调换") : "")
+                             : qsTr("暂无数据")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Repeater {
+                        model: root.todayData ? root.todayData.members : []
+
+                        delegate: RowLayout {
+                            required property var modelData
+                            required property int index
+
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: (modelData.name && modelData.name.length > 0)
+                                      ? modelData.name : qsTr("（未命名）")
+                                font.pixelSize: 14
+                                font.strikeout: modelData.status === "absent"
+                                opacity: modelData.status === "absent" ? 0.5 : 1.0
+                            }
+                            Text {
+                                text: modelData.task ? "· " + modelData.task : ""
+                                font.pixelSize: 12
+                                opacity: 0.55
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Button {
+                                text: modelData.status === "absent"
+                                      ? qsTr("恢复正常") : qsTr("标记请假")
+                                highlighted: modelData.status !== "absent"
+                                onClicked: root.toggleMemberStatus(index)
+                            }
+                        }
+                    }
+
+                    Text {
+                        visible: !root.todayData || !root.todayData.members || root.todayData.members.length === 0
+                        text: qsTr("今日没有值日成员")
+                        opacity: 0.55
+                        font.pixelSize: 12
+                    }
+                }
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_arrow_sync_20_regular"
+                title: qsTr("手动换组")
+                description: qsTr("临时切换今日值日小组，不影响自动轮换规则；点击重置恢复自动计算结果")
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Button {
+                        text: qsTr("上一组")
+                        onClicked: { if (root.backend) root.backend.prev_group() }
+                    }
+                    Button {
+                        text: qsTr("重置")
+                        enabled: root.todayData ? root.todayData.offset !== 0 : false
+                        onClicked: { if (root.backend) root.backend.reset_group() }
+                    }
+                    Button {
+                        text: qsTr("下一组")
+                        highlighted: true
+                        onClicked: { if (root.backend) root.backend.next_group() }
+                    }
+
+                    Item { Layout.fillWidth: true }
+                }
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_data_histogram_20_regular"
+                title: qsTr("值日统计")
+                description: qsTr("自动记录每日值日，手动换组会标记为“调换”")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
 
                         Text {
-                            text: modelData.date
-                            font.pixelSize: 12
-                            opacity: 0.6
-                            Layout.preferredWidth: 86
+                            text: qsTr("已记录 %1 天值日").arg(root.statsData.days)
+                            font.pixelSize: 13
+                            opacity: 0.7
                         }
-                        Text {
-                            text: modelData.groupName
-                            font.pixelSize: 12
-                            font.bold: true
+
+                        Item { Layout.fillWidth: true }
+
+                        Button {
+                            text: qsTr("清空记录")
+                            enabled: root.statsData.days > 0
+                            onClicked: clearHistoryPopup.open()
                         }
-                        Text {
-                            visible: modelData.switched
-                            text: qsTr("调换")
-                            font.pixelSize: 10
-                            color: "#FFFFFF"
-                            Rectangle {
-                                anchors.fill: parent
-                                anchors.margins: -3
-                                radius: 6
-                                color: "#E5A100"
-                                z: -1
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        visible: root.statsData.rows.length > 0
+
+                        Text { text: qsTr("姓名"); Layout.preferredWidth: 120; opacity: 0.5; font.pixelSize: 12 }
+                        Text { text: qsTr("值日次数"); Layout.preferredWidth: 80; opacity: 0.5; font.pixelSize: 12 }
+                        Text { text: qsTr("请假次数"); Layout.preferredWidth: 80; opacity: 0.5; font.pixelSize: 12 }
+                    }
+
+                    Repeater {
+                        model: root.statsData.rows
+
+                        delegate: RowLayout {
+                            required property var modelData
+
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text { text: modelData.name; Layout.preferredWidth: 120; font.pixelSize: 13 }
+                            Text { text: modelData.count; Layout.preferredWidth: 80; font.pixelSize: 13 }
+                            Text {
+                                text: modelData.absent
+                                Layout.preferredWidth: 80
+                                font.pixelSize: 13
+                                color: modelData.absent > 0 ? "#E5594F" : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.topMargin: 6
+                        text: qsTr("最近记录")
+                        font.pixelSize: 13
+                        font.bold: true
+                        visible: root.statsData.recent.length > 0
+                    }
+
+                    Repeater {
+                        model: root.statsData.recent
+
+                        delegate: ColumnLayout {
+                            required property var modelData
+
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+
+                                Text {
+                                    text: modelData.date
+                                    font.pixelSize: 12
+                                    opacity: 0.6
+                                    Layout.preferredWidth: 86
+                                }
+                                Text {
+                                    text: modelData.groupName
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                }
+                                Text {
+                                    visible: modelData.switched
+                                    text: qsTr("调换")
+                                    font.pixelSize: 10
+                                    color: "#FFFFFF"
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        anchors.margins: -3
+                                        radius: 6
+                                        color: "#E5A100"
+                                        z: -1
+                                    }
+                                }
+
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: root.formatRecordMembers(modelData.members)
+                                font.pixelSize: 12
+                                opacity: 0.75
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ============================================================
+    // 页面 4：迁移 / 备份
+    // ============================================================
+    Component {
+        id: backupPage
+        ColumnLayout {
+            spacing: 12
+            Layout.fillWidth: true
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_arrow_import_20_regular"
+                title: qsTr("配置导入 / 导出")
+                description: qsTr("导出当前分组、轮换和假期到文件；从文件快速导入配置（不含历史记录和手动调换）")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    TextField {
+                        id: configPathField
+                        Layout.fillWidth: true
+                        text: Qt.platform.os === "windows" ? "C:/Users/Lenovo/Desktop/duty_config.json" : "~/Desktop/duty_config.json"
+                        placeholderText: qsTr("文件路径，如 C:/Users/.../duty_config.json")
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        Button {
+                            text: qsTr("导出配置")
+                            onClicked: {
+                                var r = root.backend.export_config(configPathField.text)
+                                configResultText.text = r.ok ? qsTr("已导出到：") + r.msg : qsTr("导出失败：") + r.msg
+                                configResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                            }
+                        }
+
+                        Button {
+                            text: qsTr("导入配置")
+                            highlighted: true
+                            onClicked: {
+                                var r = root.backend.import_config(configPathField.text)
+                                configResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
+                                configResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                                if (r.ok) root.loadData()
                             }
                         }
 
                         Item { Layout.fillWidth: true }
                     }
 
-                    Text {
+                    ResultText { id: configResultText }
+                }
+            }
+
+            SettingCard {
+                Layout.fillWidth: true
+                icon.name: "ic_fluent_table_20_regular"
+                title: qsTr("值日表导出")
+                description: qsTr("按当前轮换规则生成未来排班，导出 CSV（Excel 可编辑）和 HTML（可打印/存 PDF）到桌面")
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: root.formatRecordMembers(modelData.members)
-                        font.pixelSize: 12
-                        opacity: 0.75
-                        wrapMode: Text.WordWrap
+                        spacing: 8
+
+                        WeekButton {
+                            weeks: 2
+                            backend: root.backend
+                            onDone: { backupScheduleText.text = result.msg; backupScheduleText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                        }
+                        WeekButton {
+                            weeks: 4
+                            accent: true
+                            backend: root.backend
+                            onDone: { backupScheduleText.text = result.msg; backupScheduleText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                        }
+                        WeekButton {
+                            weeks: 8
+                            backend: root.backend
+                            onDone: { backupScheduleText.text = result.msg; backupScheduleText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                        }
+
+                        Item { Layout.fillWidth: true }
                     }
+
+                    ResultText { id: backupScheduleText }
                 }
             }
         }
     }
 
+    // 清空历史确认弹窗（全局唯一）
     Popup {
         id: clearHistoryPopup
         parent: Overlay.overlay
@@ -1031,143 +1562,6 @@ PluginPage {
                     }
                 }
             }
-        }
-    }
-
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_arrow_import_20_regular"
-        title: qsTr("配置导入 / 导出")
-        description: qsTr("导出当前分组、轮换和假期到文件；从文件快速导入配置（不含历史记录和手动调换）")
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            TextField {
-                id: configPathField
-                Layout.fillWidth: true
-                text: Qt.platform.os === "windows" ? "C:/Users/Lenovo/Desktop/duty_config.json" : "~/Desktop/duty_config.json"
-                placeholderText: qsTr("文件路径，如 C:/Users/.../duty_config.json")
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                Button {
-                    text: qsTr("导出配置")
-                    onClicked: {
-                        var r = root.backend.export_config(configPathField.text)
-                        configResultText.text = r.ok
-                            ? qsTr("已导出到：") + r.msg
-                            : qsTr("导出失败：") + r.msg
-                        configResultText.color = r.ok ? "#2E7D32" : "#E5594F"
-                    }
-                }
-
-                Button {
-                    text: qsTr("导入配置")
-                    highlighted: true
-                    onClicked: {
-                        var r = root.backend.import_config(configPathField.text)
-                        configResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
-                        configResultText.color = r.ok ? "#2E7D32" : "#E5594F"
-                        if (r.ok) {
-                            root.loadData()
-                        }
-                    }
-                }
-
-                Item { Layout.fillWidth: true }
-            }
-
-            Text {
-                id: configResultText
-                Layout.fillWidth: true
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-                visible: text.length > 0
-            }
-        }
-    }
-
-    // “未来 N 周”导出按钮：backend 由外部注入，结果经 done 信号交回外层显示
-    component WeekButton: Button {
-        id: weekBtn
-        property int weeks: 1
-        property bool accent: false
-        property var backend: null
-        signal done(var result)
-
-        highlighted: weekBtn.accent
-        text: qsTr("未来 %1 周").arg(weekBtn.weeks)
-        onClicked: {
-            if (weekBtn.backend)
-                weekBtn.done(weekBtn.backend.export_schedule(weekBtn.weeks))
-        }
-    }
-
-    SettingCard {
-        Layout.fillWidth: true
-        icon.name: "ic_fluent_table_20_regular"
-        title: qsTr("值日表导出")
-        description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记），同时导出 CSV（Excel 可编辑）和 HTML（浏览器打开可打印/存 PDF）到桌面")
-
-        ColumnLayout {
-            Layout.fillWidth: true
-            spacing: 8
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-
-                WeekButton {
-                    weeks: 2
-                    backend: root.backend
-                    onDone: {
-                        scheduleResultText.text = result.msg
-                        scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F"
-                    }
-                }
-                WeekButton {
-                    weeks: 4
-                    accent: true
-                    backend: root.backend
-                    onDone: {
-                        scheduleResultText.text = result.msg
-                        scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F"
-                    }
-                }
-                WeekButton {
-                    weeks: 8
-                    backend: root.backend
-                    onDone: {
-                        scheduleResultText.text = result.msg
-                        scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F"
-                    }
-                }
-
-                Item { Layout.fillWidth: true }
-            }
-
-            Text {
-                id: scheduleResultText
-                Layout.fillWidth: true
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-                visible: text.length > 0
-            }
-        }
-    }
-
-    Button {
-        Layout.fillWidth: true
-        text: qsTr("保存设置")
-        highlighted: true
-        onClicked: {
-            root.doSave()
-            root.refreshTodayStats()
         }
     }
 

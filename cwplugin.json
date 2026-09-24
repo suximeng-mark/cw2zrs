@@ -1,11 +1,11 @@
 {
   "id": "com.studentondutyshow.com",
   "name": "值日生",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "api_version": ">=0.4.2",
   "entry": "main.py",
   "author": "zrs",
-  "description": "显示今日值日生，支持自定义分组、多种轮换、考勤统计、明日预告与定时提醒",
+  "description": "显示今日值日生，支持自定义分组、多种轮换、临时调班、周历预览、考勤统计、明日预告与定时提醒",
   "url": "https://github.com/suximeng-mark/cw2zrs",
   "readme": "README.md",
   "icon": "icon.png"
