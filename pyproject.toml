@@ -1,6 +1,6 @@
 [project]
 name = "com-studentondutyshow-com"
-version = "1.9.4"
+version = "1.9.5"
 description = "Class Widgets 2 值日生插件，支持自定义分组、按周/每天/工作日轮换与值日步长、月历调班、组件显隐与分节备份"
 authors = [
     {name = "zrs"},
