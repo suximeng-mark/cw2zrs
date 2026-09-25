@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import RinUI
 import ClassWidgets.Plugins
 
@@ -61,6 +62,13 @@ PluginPage {
     // 编辑版本号：切换组/增删成员后强制刷新绑定
     property int editRev: 0
 
+    // 系统文件对话框：当前待执行动作 + 选中的路径
+    property string fileDialogAction: ""    // exportConfig / exportBackup / importConfig / importBackup
+    property string pendingImportPath: ""
+    // 值日表导出：待用周数 + 结果写入目标
+    property int pendingWeeks: 4
+    property string scheduleSink: "schedule"    // schedule / configTable
+
     // 导航：当前激活页索引
     property int currentPage: 0
     property var navItems: [
@@ -86,6 +94,41 @@ PluginPage {
 
     function clone(o) {
         return JSON.parse(JSON.stringify(o))
+    }
+
+    // ===== 系统文件对话框 =====
+    // file:///C:/a/b.json → C:/a/b.json（并还原中文/空格转义）
+    function urlToLocalPath(u) {
+        if (!u) return ""
+        var s = String(u)
+        if (s.indexOf("file:///") === 0) s = s.substring(8)
+        try { s = decodeURIComponent(s) } catch (e) {}
+        return s
+    }
+
+    // 兼容不同 Qt 版本：优先 selectedFile / selectedFolder(6.4+)，回退 fileUrls / file(6.2/6.3)
+    function dialogPath(dlg) {
+        var u = dlg.selectedFile
+        if (u === undefined || u === null || u === "") u = dlg.selectedFolder  // FolderDialog
+        if (u === undefined || u === null || u === "") {
+            var fs = dlg.fileUrls
+            if (fs !== undefined && fs !== null && fs.length) u = fs[0]
+            else u = dlg.file
+        }
+        return root.urlToLocalPath(u)
+    }
+
+    function requestFile(action, mode, dlg) {
+        root.fileDialogAction = action
+        dlg.open()
+    }
+
+    // 值日表导出：选目录后写出 CSV + HTML
+    function requestScheduleFolder(weeks, sink) {
+        root.pendingWeeks = weeks
+        root.scheduleSink = sink === undefined ? "schedule" : sink
+        folderDialog.title = qsTr("选择导出目录（未来 %1 周）").arg(weeks)
+        folderDialog.open()
     }
 
     // ===== 显示设置 =====
@@ -1061,35 +1104,26 @@ PluginPage {
 
                             Button {
                                 text: qsTr("导入配置表")
-                                onClicked: importConfigPopup.open()
+                                onClicked: {
+                                    openDialog.title = qsTr("选择配置表")
+                                    root.requestFile("importConfig", "open", openDialog)
+                                }
                             }
 
                             Button {
                                 text: qsTr("导出配置表")
                                 onClicked: {
-                                    var r = root.backend.export_config(configTablePathField.text)
-                                    configTableResultText.text = r.ok ? qsTr("已导出到：") + r.msg : qsTr("导出失败：") + r.msg
-                                    configTableResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                                    saveDialog.title = qsTr("导出配置表到…")
+                                    root.requestFile("exportConfig", "save", saveDialog)
                                 }
                             }
 
                             Button {
-                                text: qsTr("写出值日排班表")
-                                onClicked: {
-                                    var r = root.backend.export_schedule(4)
-                                    configTableResultText.text = r.msg
-                                    configTableResultText.color = r.ok ? "#2E7D32" : "#E5594F"
-                                }
+                                text: qsTr("写出值日排班表…")
+                                onClicked: root.requestScheduleFolder(4, "configTable")
                             }
 
                             Item { Layout.fillWidth: true }
-                        }
-
-                        TextField {
-                            id: configTablePathField
-                            Layout.fillWidth: true
-                            text: "~/Desktop/duty_config.json"
-                            placeholderText: qsTr("配置表路径，支持 ~")
                         }
 
                         ResultText { id: configTableResultText }
@@ -1689,7 +1723,7 @@ PluginPage {
                     Layout.fillWidth: true
                     icon.name: "ic_fluent_table_20_regular"
                     title: qsTr("值日表导出")
-                    description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记），同时导出 CSV 和 HTML 到桌面")
+                    description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记）；选择目录后同时导出 CSV 和 HTML")
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -1701,19 +1735,16 @@ PluginPage {
 
                             WeekButton {
                                 weeks: 2
-                                backend: root.backend
-                                onDone: { scheduleResultText.text = result.msg; scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                                onPicked: root.requestScheduleFolder(w)
                             }
                             WeekButton {
                                 weeks: 4
                                 accent: true
-                                backend: root.backend
-                                onDone: { scheduleResultText.text = result.msg; scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                                onPicked: root.requestScheduleFolder(w)
                             }
                             WeekButton {
                                 weeks: 8
-                                backend: root.backend
-                                onDone: { scheduleResultText.text = result.msg; scheduleResultText.color = result.ok ? "#2E7D32" : "#E5594F" }
+                                onPicked: root.requestScheduleFolder(w)
                             }
 
                             Item { Layout.fillWidth: true }
@@ -2066,42 +2097,24 @@ PluginPage {
                         Layout.fillWidth: true
                         spacing: 8
 
-                        TextField {
-                            id: backupPathField
-                            Layout.fillWidth: true
-                            text: "~/Desktop/duty_backup.json"
-                            placeholderText: qsTr("备份文件路径，支持 ~")
-                        }
-
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
 
                             Button {
-                                text: qsTr("导出备份")
+                                text: qsTr("导出备份到…")
                                 onClicked: {
-                                    var r = root.backend.export_backup(
-                                        backupPathField.text,
-                                        root.backupDisplay, root.backupPeople,
-                                        root.backupRotation, root.backupHistory
-                                    )
-                                    backupResultText.text = r.ok ? qsTr("已导出到：") + r.msg : qsTr("导出失败：") + r.msg
-                                    backupResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                                    saveDialog.title = qsTr("导出备份到…")
+                                    root.requestFile("exportBackup", "save", saveDialog)
                                 }
                             }
 
                             Button {
-                                text: qsTr("导入备份")
+                                text: qsTr("从文件导入备份")
                                 highlighted: true
                                 onClicked: {
-                                    var r = root.backend.import_backup(
-                                        backupPathField.text,
-                                        root.backupDisplay, root.backupPeople,
-                                        root.backupRotation, root.backupHistory
-                                    )
-                                    backupResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
-                                    backupResultText.color = r.ok ? "#2E7D32" : "#E5594F"
-                                    if (r.ok) root.loadData()
+                                    openDialog.title = qsTr("选择备份文件")
+                                    root.requestFile("importBackup", "open", openDialog)
                                 }
                             }
 
@@ -2161,19 +2174,16 @@ PluginPage {
     }
 
     // “未来 N 周”导出按钮
+    // 只负责把周数抛出去；目录对话框由外层处理，避免在嵌套组件里引用外部 id
     component WeekButton: Button {
         id: weekBtn
         property int weeks: 1
         property bool accent: false
-        property var backend: null
-        signal done(var result)
+        signal picked(int w)
 
         highlighted: weekBtn.accent
         text: qsTr("未来 %1 周").arg(weekBtn.weeks)
-        onClicked: {
-            if (weekBtn.backend)
-                weekBtn.done(weekBtn.backend.export_schedule(weekBtn.weeks))
-        }
+        onClicked: weekBtn.picked(weekBtn.weeks)
     }
 
     // 通用保存结果文本
@@ -2300,7 +2310,88 @@ PluginPage {
         }
     }
 
-    // 导入配置表路径弹窗
+    // ============================================================
+    // 系统文件对话框（QtQuick.Dialogs，Windows 下为原生对话框）
+    // ============================================================
+
+    FileDialog {
+        id: saveDialog
+        fileMode: FileDialog.SaveFile
+        title: qsTr("导出到…")
+        defaultSuffix: "json"
+        nameFilters: [qsTr("JSON 文件 (*.json)"), qsTr("所有文件 (*)")]
+
+        onAccepted: {
+            var p = root.dialogPath(saveDialog)
+            if (!p) return
+
+            if (root.fileDialogAction === "exportConfig") {
+                var r = root.backend.export_config(p)
+                configTableResultText.text = r.ok ? qsTr("已导出到：") + r.msg
+                                                  : qsTr("导出失败：") + r.msg
+                configTableResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+            } else if (root.fileDialogAction === "exportBackup") {
+                var rb = root.backend.export_backup(
+                    p, root.backupDisplay, root.backupPeople,
+                    root.backupRotation, root.backupHistory
+                )
+                backupResultText.text = rb.ok ? qsTr("已导出到：") + rb.msg
+                                              : qsTr("导出失败：") + rb.msg
+                backupResultText.color = rb.ok ? "#2E7D32" : "#E5594F"
+            }
+            root.fileDialogAction = ""
+        }
+
+        onRejected: root.fileDialogAction = ""
+    }
+
+    FileDialog {
+        id: openDialog
+        fileMode: FileDialog.OpenFile
+        title: qsTr("选择文件")
+        nameFilters: [qsTr("JSON 文件 (*.json)"), qsTr("所有文件 (*)")]
+
+        onAccepted: {
+            var p = root.dialogPath(openDialog)
+            if (!p) return
+
+            if (root.fileDialogAction === "importConfig") {
+                // 先弹出确认，避免误覆盖现有分组与轮换
+                root.pendingImportPath = p
+                importConfigPopup.open()
+            } else if (root.fileDialogAction === "importBackup") {
+                var r = root.backend.import_backup(
+                    p, root.backupDisplay, root.backupPeople,
+                    root.backupRotation, root.backupHistory
+                )
+                backupResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
+                backupResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                if (r.ok) root.loadData()
+            }
+            root.fileDialogAction = ""
+        }
+
+        onRejected: root.fileDialogAction = ""
+    }
+
+    // 值日表导出目录（CSV + HTML 两个文件，故用目录对话框）
+    FolderDialog {
+        id: folderDialog
+        title: qsTr("选择导出目录")
+
+        onAccepted: {
+            var p = root.dialogPath(folderDialog)
+            if (!p) return
+
+            var r = root.backend.export_schedule(root.pendingWeeks, p)
+            var sink = root.scheduleSink === "configTable" ? configTableResultText
+                                                           : scheduleResultText
+            sink.text = r.ok ? r.msg : qsTr("导出失败：") + r.msg
+            sink.color = r.ok ? "#2E7D32" : "#E5594F"
+        }
+    }
+
+    // 导入配置表确认弹窗
     Popup {
         id: importConfigPopup
         parent: Overlay.overlay
@@ -2324,17 +2415,22 @@ PluginPage {
 
             Text {
                 Layout.fillWidth: true
-                text: qsTr("输入导出的配置表 JSON 路径；导入后分组、轮换与假期将被覆盖")
+                text: qsTr("导入后分组、轮换与假期将被覆盖")
                 color: "#888"
                 font.pixelSize: 12
                 wrapMode: Text.WordWrap
             }
 
-            TextField {
-                id: importConfigPathField
+            Frame {
                 Layout.fillWidth: true
-                text: configTablePathField.text
-                placeholderText: qsTr("配置表路径，支持 ~")
+
+                Text {
+                    anchors.fill: parent
+                    text: root.pendingImportPath || qsTr("（未选择文件）")
+                    font.pixelSize: 12
+                    wrapMode: Text.WrapAnywhere
+                    color: root.pendingImportPath ? "#333" : "#888"
+                }
             }
 
             RowLayout {
@@ -2352,7 +2448,7 @@ PluginPage {
                     text: qsTr("导入")
                     highlighted: true
                     onClicked: {
-                        var r = root.backend.import_config(importConfigPathField.text)
+                        var r = root.backend.import_config(root.pendingImportPath)
                         configTableResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
                         configTableResultText.color = r.ok ? "#2E7D32" : "#E5594F"
                         if (r.ok) root.loadData()

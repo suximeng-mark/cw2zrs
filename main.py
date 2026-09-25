@@ -1734,9 +1734,12 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
         self._persist()
         return True
 
-    @Slot(int, result="QVariant")
-    def export_schedule(self, weeks: int) -> Dict[str, Any]:
-        """导出未来 N 周值日表（CSV + HTML）到桌面。"""
+    @Slot(int, str, result="QVariant")
+    def export_schedule(self, weeks: int, out_dir: str = "") -> Dict[str, Any]:
+        """导出未来 N 周值日表（CSV + HTML）。
+
+        out_dir 为空时回落到系统桌面，保持与旧调用方式兼容。
+        """
         try:
             weeks = int(weeks)
         except (ValueError, TypeError):
@@ -1752,17 +1755,20 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
             rows = self._build_schedule_rows(start_day, weeks)
 
             base = f"值日表_{start_day.isoformat()}起_{weeks}周"
-            out_dir = self._desktop_dir()
-            out_dir.mkdir(parents=True, exist_ok=True)
-            csv_path = out_dir / f"{base}.csv"
-            html_path = out_dir / f"{base}.html"
+            target = str(out_dir or "").strip()
+            out_dir_path = (
+                Path(os.path.expanduser(target)) if target else self._desktop_dir()
+            )
+            out_dir_path.mkdir(parents=True, exist_ok=True)
+            csv_path = out_dir_path / f"{base}.csv"
+            html_path = out_dir_path / f"{base}.html"
             self._write_schedule_csv(csv_path, rows)
             self._write_schedule_html(html_path, rows, start_day, end_day, weeks)
 
             logger.info(f"[值日生] 值日表已导出：{csv_path.name}, {html_path.name}")
             return {
                 "ok": True,
-                "msg": f"已导出到：{out_dir}\n{csv_path.name}\n{html_path.name}",
+                "msg": f"已导出到：{out_dir_path}\n{csv_path.name}\n{html_path.name}",
             }
         except Exception as e:
             logger.error(f"[值日生] 值日表导出失败: {e}")
