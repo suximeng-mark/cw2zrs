@@ -466,11 +466,8 @@ Widget {
             }
         }
 
-        // 点击紧凑模式切换下一组
-        TapHandler {
-            enabled: root.miniMode && root.backend
-            onTapped: if (root.backend) root.backend.next_group()
-        }
+        // 紧凑模式不响应点击：此前点一下就会调 next_group() 累加 _manual_offset 并写盘，
+        // 导致「只点了下部件，值日组就永久偏移了」。手动切组一律走普通模式底部的按钮。
 
         // ===== 普通模式：完整展开 =====
         RowLayout {
