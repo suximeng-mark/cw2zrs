@@ -25,6 +25,21 @@ Widget {
     function fName()  { return root.duty ? root.duty.fontName  : 14 }
     function fTask()  { return root.duty ? root.duty.fontTask  : 14 }
 
+    // 手动轮换偏移（_manual_offset）不为 0 时的兜底恢复入口：
+    // 普通模式底部的「重置」按钮在紧凑模式下不显示，这里补一个
+    function offsetActive() {
+        return !!root.duty && root.duty.offset !== 0
+    }
+
+    function offsetText() {
+        if (!root.duty || !root.duty.offset) return ""
+        return qsTr("已手动调整 %1 组，点此恢复自动轮换").arg(Math.abs(root.duty.offset))
+    }
+
+    function resetOffset() {
+        if (root.backend) root.backend.reset_group()
+    }
+
     // 组件显隐由设置页配置（缺省显示）
     function showGroup() { return root.duty ? (root.duty.showGroup !== false) : true }
     function showName()  { return root.duty ? (root.duty.showName !== false) : true }
@@ -462,6 +477,26 @@ Widget {
                            : Qt.alpha("#000000", 0.75)
                     elide: Text.ElideRight
                     Layout.maximumWidth: root.miniMaxWidth - 48
+                }
+            }
+
+            // 仅在手动偏移不为 0 时出现，避免常态占位
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: root.offsetActive()
+
+                DutyPillButton {
+                    label: qsTr("重置轮换")
+                    Layout.preferredWidth: 88
+                    onClicked: root.resetOffset()
+                }
+                Text {
+                    text: root.offsetText()
+                    font.pixelSize: root.fMeta()
+                    opacity: 0.6
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                 }
             }
         }
