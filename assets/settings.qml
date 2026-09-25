@@ -17,7 +17,7 @@ PluginPage {
     property string rotationMode: "weekly"
     property string weekendMode: "merge"
     property int slotDays: 1          // 轮换步长：每 N 个轮换单位算一次值日
-    property var mergeDays: []        // 临时合并：标记日 + 次日合计 1 档
+    property var mergePairs: []       // 临时合并：[{a, b}]，成对的任意两天合计 1 档
     property var holidaysData: []
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": []}
@@ -60,6 +60,12 @@ PluginPage {
     property int calYear: 0
     property int calMonth: 0
     property string selectedDate: ""
+
+    // 切换选中日期时，把「合并对象」输入框恢复为该日的默认建议值
+    onSelectedDateChanged: {
+        if (mergePartnerField)
+            mergePartnerField.text = root.selectedMergeDefault()
+    }
 
     // 编辑版本号：切换组/增删成员后强制刷新绑定
     property int editRev: 0
@@ -206,7 +212,7 @@ PluginPage {
         root.rotationMode = root.backend.get_rotation_mode()
         root.weekendMode = root.backend.get_weekend_mode()
         root.slotDays = root.backend.get_slot_days()
-        root.mergeDays = root.backend.get_merge_days()
+        root.mergePairs = root.backend.get_merge_pairs()
         root.holidaysData = root.clone(root.backend.get_holidays())
         root.loadDisplayData()
         root.loadReminderData()
@@ -362,32 +368,64 @@ PluginPage {
         return qsTr("同一组连续值日 %1 %2后，再换下一组").arg(step).arg(root.slotUnit())
     }
 
-    // ===== 临时合并（月历点选：该日与次日合并计 1 档）=====
-    function selectedMergeOn() {
-        return root.mergeDays.indexOf(root.selectedDate) >= 0
-    }
-
-    function selectedMergeWith() {
-        if (!root.selectedDate) return ""
-        var p = root.selectedDate.split("-")
+    // ===== 临时合并（月历点选：该日与任意另一天合并计 1 档）=====
+    function nextDayOf(iso) {
+        if (!iso) return ""
+        var p = iso.split("-")
         var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]))
         d.setDate(d.getDate() + 1)
         function pad(n) { return String(n).padStart(2, "0") }
         return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
     }
 
-    function applyMerge(on) {
+    // 已合并则返回对方日期，否则给出默认的次日
+    function selectedMergeDefault() {
+        for (var i = 0; i < root.mergePairs.length; i++) {
+            var p = root.mergePairs[i]
+            if (p.a === root.selectedDate) return p.b
+            if (p.b === root.selectedDate) return p.a
+        }
+        return root.nextDayOf(root.selectedDate)
+    }
+
+    function selectedIsMerged() {
+        for (var i = 0; i < root.mergePairs.length; i++) {
+            var p = root.mergePairs[i]
+            if (p.a === root.selectedDate || p.b === root.selectedDate) return true
+        }
+        return false
+    }
+
+    function reloadMergePairs() {
+        if (!root.backend) return
+        root.mergePairs = root.backend.get_merge_pairs()
+        root.refreshTodayStats()
+        root.loadMonth(root.calYear, root.calMonth)
+    }
+
+    function applyMergePair(partner) {
         if (!root.backend || !root.selectedDate) return false
         var ok = false
         try {
-            ok = root.backend.set_merge_day(root.selectedDate, on)
+            ok = root.backend.add_merge_pair(root.selectedDate, partner)
         } catch (e) {
             console.error("[值日生] 临时合并保存失败: " + e)
         }
         if (!ok) return false
-        root.mergeDays = root.backend.get_merge_days()
-        root.refreshTodayStats()
-        root.loadMonth(root.calYear, root.calMonth)
+        root.reloadMergePairs()
+        return true
+    }
+
+    function clearMergeAt(day) {
+        if (!root.backend || !day) return false
+        var ok = false
+        try {
+            ok = root.backend.remove_merge_pair(day)
+        } catch (e) {
+            console.error("[值日生] 临时合并取消失败: " + e)
+        }
+        if (!ok) return false
+        root.reloadMergePairs()
         return true
     }
 
@@ -1516,7 +1554,7 @@ PluginPage {
 
                         Label {
                             Layout.fillWidth: true
-                            text: qsTr("点选日期可标记放假 / 临时调班 / 与次日合并计 1 档")
+                            text: qsTr("点选日期可标记放假 / 临时调班，或与任意另一天合并计 1 档")
                             opacity: 0.55
                             font.pixelSize: 12
                             wrapMode: Text.WordWrap
@@ -1582,7 +1620,7 @@ PluginPage {
                                         color: "#E5A100"
                                     }
 
-                                    // 临时合并：右侧竖条=与次日合并的起始日，左侧浅竖条=被吸收的次日
+                                    // 临时合并：右侧竖条=已与另一天合并计 1 档
                                     Rectangle {
                                         anchors.right: parent.right
                                         anchors.rightMargin: 1
@@ -1591,17 +1629,6 @@ PluginPage {
                                         height: Math.max(10, parent.height - 14)
                                         radius: 1.5
                                         visible: !!calCell.modelData.isMerge
-                                        color: Colors.proxy.primaryColor
-                                    }
-                                    Rectangle {
-                                        anchors.left: parent.left
-                                        anchors.leftMargin: 1
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: 3
-                                        height: Math.max(10, parent.height - 14)
-                                        radius: 1.5
-                                        opacity: 0.4
-                                        visible: !!calCell.modelData.isMergeTail
                                         color: Colors.proxy.primaryColor
                                     }
 
@@ -1635,10 +1662,8 @@ PluginPage {
                                         if (info.holidayName) s += (s ? " · " : "") + info.holidayName
                                         if (info.isSwap && info.autoGroupName)
                                             s += (s ? " · " : "") + qsTr("原：") + info.autoGroupName
-                                        if (info.isMerge)
-                                            s += (s ? " · " : "") + qsTr("与次日合并")
-                                        else if (info.isMergeTail)
-                                            s += (s ? " · " : "") + qsTr("与昨日合并")
+                                        if (info.mergeWith)
+                                            s += (s ? " · " : "") + qsTr("与 %1 合并计 1 档").arg(info.mergeWith)
                                         return s
                                     }
                                     font.pixelSize: 12
@@ -1700,27 +1725,49 @@ PluginPage {
                                 spacing: 10
                                 visible: root.rotationMode !== "weekly"
 
-                                CheckBox {
-                                    id: calMergeCheck
-                                    text: qsTr("该日与次日（%1）合并计 1 档").arg(root.selectedMergeWith())
-                                    checked: root.selectedMergeOn()
-                                    onToggled: {
-                                        var on = calMergeCheck.checked
-                                        if (!root.applyMerge(on)) {
-                                            calMergeCheck.checked = root.selectedMergeOn()
-                                            calResultText.text = qsTr("操作失败：日期无效或已达上限")
+                                Label { text: qsTr("该日与"); opacity: 0.7; font.pixelSize: 12 }
+                                TextField {
+                                    id: mergePartnerField
+                                    Layout.preferredWidth: 120
+                                    placeholderText: "YYYY-MM-DD"
+                                    text: root.selectedMergeDefault()
+                                }
+                                Label { text: qsTr("合并计 1 档"); opacity: 0.7; font.pixelSize: 12 }
+                                Button {
+                                    text: qsTr("合并")
+                                    onClicked: {
+                                        var partner = mergePartnerField.text.trim()
+                                        if (!root.validDate(partner)) {
+                                            calResultText.text = qsTr("日期格式应为 YYYY-MM-DD")
                                             calResultText.color = "#E5594F"
                                             return
                                         }
-                                        calResultText.text = on
-                                              ? qsTr("已合并：%1 与 %2 合计 1 档 ").arg(root.selectedDate).arg(root.selectedMergeWith())
-                                                + root.saveStamp()
-                                              : qsTr("已取消合并 ") + root.saveStamp()
+                                        if (partner === root.selectedDate) {
+                                            calResultText.text = qsTr("不能与同一天合并")
+                                            calResultText.color = "#E5594F"
+                                            return
+                                        }
+                                        if (!root.applyMergePair(partner)) {
+                                            calResultText.text = qsTr("合并失败：该日期已在其他配对中，或已达上限")
+                                            calResultText.color = "#E5594F"
+                                            return
+                                        }
+                                        calResultText.text = qsTr("已合并：%1 与 %2 合计 1 档 ").arg(root.selectedDate).arg(partner)
+                                                             + root.saveStamp()
                                         calResultText.color = "#2E7D32"
                                     }
                                 }
+                                Button {
+                                    text: qsTr("取消合并")
+                                    enabled: root.selectedIsMerged()
+                                    onClicked: {
+                                        var ok = root.clearMergeAt(root.selectedDate)
+                                        calResultText.text = ok ? qsTr("已取消合并 ") + root.saveStamp() : qsTr("取消失败")
+                                        calResultText.color = ok ? "#2E7D32" : "#E5594F"
+                                    }
+                                }
                                 Label {
-                                    text: qsTr("临时生效：只影响这一天，用完取消即可")
+                                    text: qsTr("任意两天均可配对；临时生效，取消即恢复")
                                     opacity: 0.55
                                     font.pixelSize: 12
                                 }
