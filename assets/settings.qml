@@ -16,6 +16,7 @@ PluginPage {
     property string startDateText: ""
     property string rotationMode: "weekly"
     property string weekendMode: "merge"
+    property int slotDays: 1          // 轮换步长：每 N 个轮换单位算一次值日
     property var holidaysData: []
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": []}
@@ -203,6 +204,7 @@ PluginPage {
         root.startDateText = root.backend.get_start_date()
         root.rotationMode = root.backend.get_rotation_mode()
         root.weekendMode = root.backend.get_weekend_mode()
+        root.slotDays = root.backend.get_slot_days()
         root.holidaysData = root.clone(root.backend.get_holidays())
         root.loadDisplayData()
         root.loadReminderData()
@@ -338,6 +340,47 @@ PluginPage {
         root.loadMonth(root.calYear, root.calMonth)
     }
 
+    // ===== 轮换步长（每 N 个轮换单位算一次值日）=====
+    function slotUnit() {
+        if (root.rotationMode === "weekly") return qsTr("周")
+        if (root.rotationMode === "workday") return qsTr("个工作日")
+        return qsTr("天")
+    }
+
+    function slotDaysLabels() {
+        var unit = root.slotUnit()
+        var out = []
+        for (var i = 1; i <= 6; i++) out.push(qsTr("每 %1 %2").arg(i).arg(unit))
+        return out
+    }
+
+    function slotDaysHint() {
+        var step = root.slotDays
+        if (step <= 1) return qsTr("默认：每个轮换单位换一次")
+        return qsTr("同一组连续值日 %1 %2后，再换下一组").arg(step).arg(root.slotUnit())
+    }
+
+    function applySlotDays(step) {
+        if (!root.backend || root.slotDays === step) return
+        var ok = false
+        try {
+            ok = root.backend.save_slot_days(step)
+        } catch (e) {
+            console.error("[值日生] 轮换步长保存失败: " + e)
+        }
+        if (!ok) {
+            rotationResultText.text = qsTr("保存失败：轮换步长无效")
+            rotationResultText.color = "#E5594F"
+            return
+        }
+        root.slotDays = step
+        rotationResultText.text = qsTr("轮换步长已保存：每 %1 %2换一次 ").arg(step).arg(root.slotUnit())
+                                  + root.saveStamp()
+        rotationResultText.color = "#2E7D32"
+        root.refreshTodayStats()
+        root.loadMonth(root.calYear, root.calMonth)
+    }
+
     // ===== 假期 / 月历 =====
     function validDate(s) {
         return /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(new Date(s).getTime())
@@ -461,6 +504,10 @@ PluginPage {
     function previewPeriod() {
         if (!root.todayData) return qsTr("第 1 周")
         var n = root.todayData.periodNumber || 1
+        var step = root.todayData.slotDays || 1
+        // 步长 > 1：periodNumber 表示第几次值日，括号内为本档进度
+        if (step > 1)
+            return qsTr("第 %1 次（%2/%3）").arg(n).arg(root.todayData.slotPosition || 1).arg(step)
         if (root.todayData.rotationMode === "daily") return qsTr("第 %1 天").arg(n)
         if (root.todayData.rotationMode === "workday") return qsTr("第 %1 轮").arg(n)
         return qsTr("第 %1 周").arg(n)
@@ -1143,7 +1190,7 @@ PluginPage {
                     Layout.fillWidth: true
                     icon.name: "ic_fluent_arrow_sync_20_regular"
                     title: qsTr("轮换配置")
-                    description: qsTr("选择轮换周期；工作日轮换可单独设置周末的处理方式")
+                    description: qsTr("选择轮换周期与步长（如两天算一次值日）；工作日轮换可单独设置周末的处理方式")
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -1187,6 +1234,28 @@ PluginPage {
                                     rotationResultText.text = qsTr("已切换为每周轮换 ") + root.saveStamp()
                                     rotationResultText.color = "#2E7D32"
                                 }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+
+                            Label { text: qsTr("值日步长"); opacity: 0.7; font.pixelSize: 12; Layout.preferredWidth: 72 }
+                            ComboBox {
+                                id: slotDaysCombo
+                                Layout.preferredWidth: 132
+                                enabled: !!root.backend
+                                model: root.slotDaysLabels()
+                                currentIndex: Math.max(0, Math.min(root.slotDays, 6) - 1)
+                                onActivated: root.applySlotDays(slotDaysCombo.currentIndex + 1)
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: root.slotDaysHint()
+                                opacity: 0.55
+                                font.pixelSize: 12
+                                wrapMode: Text.WordWrap
                             }
                         }
 

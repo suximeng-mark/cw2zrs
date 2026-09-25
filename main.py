@@ -88,6 +88,15 @@ WEEKEND_SKIP = "skip"
 WEEKEND_EACH = "each"
 VALID_WEEKEND_MODES = (WEEKEND_MERGE, WEEKEND_SKIP, WEEKEND_EACH)
 
+# 轮换步长（每档单位数）：多少个轮换单位算作「一次值日」
+# 1=每单位换一次（默认）；2=同一组连续值日 2 天/2 周后再换（两天算一次值日）
+# 单位随轮换周期变化：每日/工作日轮换=天，每周轮换=周
+DEFAULT_SLOT_DAYS = 1
+SLOT_DAYS_MIN = 1
+SLOT_DAYS_MAX = 12
+# 设置页下拉可选档位（覆盖日常使用，后端上限更宽以兼容旧备份）
+SLOT_DAYS_CHOICES = (1, 2, 3, 4, 5, 6)
+
 # 首次安装时的内置示例分组
 DEFAULT_GROUPS_RAW = [
     {
@@ -163,6 +172,8 @@ class Plugin(CW2Plugin):
         self._rotation_mode: str = MODE_WEEKLY
         # 工作日轮换的周末处理（merge/skip/each），见 VALID_WEEKEND_MODES
         self._weekend_mode: str = WEEKEND_MERGE
+        # 轮换步长：每 N 个轮换单位（天/周）算一次值日，1=每单位轮换
+        self._slot_days: int = DEFAULT_SLOT_DAYS
         self._manual_offset: int = 0
         # 临时调班：{date_iso: group_index}，仅覆盖当日自动轮换结果
         self._temp_swaps: Dict[str, int] = {}
@@ -385,6 +396,9 @@ class Plugin(CW2Plugin):
         wm = str(data.get("weekend_mode", "") or "")
         self._weekend_mode = wm if wm in VALID_WEEKEND_MODES else WEEKEND_MERGE
 
+        # 轮换步长：缺省/脏值回退 1（每单位轮换），保持旧配置行为不变
+        self._slot_days = self._clamp_slot_days(data.get("slot_days"))
+
         try:
             self._manual_offset = int(data.get("manual_offset", 0) or 0)
         except (ValueError, TypeError):
@@ -432,6 +446,7 @@ class Plugin(CW2Plugin):
             "start_date": self._start_date,
             "rotation_mode": self._rotation_mode,
             "weekend_mode": self._weekend_mode,
+            "slot_days": self._slot_days,
             "manual_offset": self._manual_offset,
             "temp_swaps": dict(self._temp_swaps),
             "settings": dict(self._settings),
@@ -494,6 +509,17 @@ class Plugin(CW2Plugin):
             return datetime.strptime(date_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return date.today()
+
+    @staticmethod
+    def _clamp_slot_days(value: Any) -> int:
+        """轮换步长归一化：非法/越界值回退 DEFAULT_SLOT_DAYS 或就近截断。"""
+        if value is None or value == "":
+            return DEFAULT_SLOT_DAYS
+        try:
+            n = int(value)
+        except (ValueError, TypeError):
+            return DEFAULT_SLOT_DAYS
+        return max(SLOT_DAYS_MIN, min(SLOT_DAYS_MAX, n))
 
     def _holiday_index(self) -> tuple:
         """惰性构建假期索引（随假期数据变化失效），替代逐日线性扫描。
@@ -594,7 +620,11 @@ class Plugin(CW2Plugin):
         - workday：每个非假期工作日 +1；周末（六日）整体最多 +1
         - weekly：以起始日为锚点每 7 天为一周，整周都是假期才跳过
 
-        结果按 (起始日期, 模式, 假期, 目标日期) 缓存，同一天的重复调用为 O(1)。
+        最后按轮换步长（slot_days）折算：每 N 个单位才算一次值日
+        （N=2 即同一组连续值日 2 天/2 周后再轮换）。
+
+        结果按 (起始日期, 模式, 周末处理, 步长, 假期, 目标日期) 缓存，
+        同一天的重复调用为 O(1)。
         """
         start = self._start_day
         today = today or date.today()
@@ -605,6 +635,7 @@ class Plugin(CW2Plugin):
             self._start_date,
             self._rotation_mode,
             self._weekend_mode,
+            self._slot_days,
             self._holidays_fingerprint(),
             today.isoformat(),
         )
@@ -613,11 +644,24 @@ class Plugin(CW2Plugin):
             self._slots_cache.move_to_end(fingerprint)
             return cached
 
-        slots = self._compute_elapsed_slots(start, today)
+        units = self._compute_elapsed_slots(start, today)
+        slots = units // self._slot_days if self._slot_days > 1 else units
         self._slots_cache[fingerprint] = slots
         if len(self._slots_cache) > SLOTS_CACHE_LIMIT:
             self._slots_cache.popitem(last=False)
         return slots
+
+    def _slot_progress(self, day: date) -> tuple:
+        """当前这一「次值日」的进度：(档内第几个单位, 每档单位数)。
+
+        步长=1 时恒为 (1, 1)；步长=2 时连续两天返回 (1, 2)、(2, 2)，
+        便于部件显示「第 3 次（1/2）」。
+        """
+        step = self._slot_days
+        if step <= 1 or day <= self._start_day:
+            return 1, step if step > 1 else 1
+        units = self._compute_elapsed_slots(self._start_day, day)
+        return units % step + 1, step
 
     def _compute_elapsed_slots(self, start: date, today: date) -> int:
         """按模式计算 (start, today] 内的轮换档数。
@@ -922,6 +966,10 @@ class Plugin(CW2Plugin):
             "isHoliday": bool(holiday),
             "holidayName": holiday,
             "tomorrow": None,
+            # 轮换步长：>1 时 periodNumber 表示「第几次值日」，
+            # slotPosition 为本次值日中的第几个单位（1..slotDays）
+            "slotDays": self._slot_days,
+            "slotPosition": self._slot_progress(today)[0],
         }
         result.update(self._display_payload())
 
@@ -1007,6 +1055,30 @@ class Plugin(CW2Plugin):
         self._slots_cache.clear()
         self._persist()
         logger.info(f"[值日生] 周末处理方式已保存：{mode}")
+
+    @Slot(result=int)
+    def get_slot_days(self) -> int:
+        """轮换步长：每 N 个轮换单位（天/周）算一次值日。"""
+        return self._slot_days
+
+    @Slot(int, result=bool)
+    def save_slot_days(self, value: int) -> bool:
+        """设置轮换步长（如 2 = 两天算一次值日）。越界/非法值直接拒绝。"""
+        if isinstance(value, bool) or not isinstance(value, int):
+            try:
+                value = int(str(value).strip())
+            except (ValueError, TypeError):
+                logger.error(f"[值日生] 轮换步长无效：{value!r}")
+                return False
+        if not SLOT_DAYS_MIN <= value <= SLOT_DAYS_MAX:
+            logger.error(f"[值日生] 轮换步长越界：{value}")
+            return False
+        if value != self._slot_days:
+            self._slot_days = value
+            self._slots_cache.clear()
+            self._persist()
+            logger.info(f"[值日生] 轮换步长已保存：每 {value} 个单位换一次")
+        return True
         return True
 
     # --------------------------------------------------------- display
@@ -1302,6 +1374,8 @@ class Plugin(CW2Plugin):
                 ],
                 "start_date": self._start_date,
                 "rotation_mode": self._rotation_mode,
+                "weekend_mode": self._weekend_mode,
+                "slot_days": self._slot_days,
                 "holidays": [
                     {"start": h.start, "end": h.end, "name": h.name}
                     for h in self._holidays
@@ -1341,6 +1415,10 @@ class Plugin(CW2Plugin):
             mode = str(data.get("rotation_mode", "") or "")
             if mode in VALID_MODES:
                 self._rotation_mode = mode
+            wm = str(data.get("weekend_mode", "") or "")
+            if wm in VALID_WEEKEND_MODES:
+                self._weekend_mode = wm
+            self._slot_days = self._clamp_slot_days(data.get("slot_days"))
             self._groups = groups
             self._holidays = holidays
             self._manual_offset = 0
@@ -1380,6 +1458,7 @@ class Plugin(CW2Plugin):
                     "start_date": self._start_date,
                     "rotation_mode": self._rotation_mode,
                     "weekend_mode": self._weekend_mode,
+                    "slot_days": self._slot_days,
                     "holidays": self._build_config_payload()["holidays"],
                     "temp_swaps": dict(self._temp_swaps),
                 }
@@ -1424,6 +1503,8 @@ class Plugin(CW2Plugin):
                     "rotation": {
                         "start_date": data.get("start_date", ""),
                         "rotation_mode": data.get("rotation_mode", ""),
+                        "weekend_mode": data.get("weekend_mode", ""),
+                        "slot_days": data.get("slot_days", ""),
                         "holidays": data.get("holidays", []),
                     },
                 }
@@ -1450,6 +1531,8 @@ class Plugin(CW2Plugin):
                 wm = str(rot.get("weekend_mode", "") or "")
                 if wm in VALID_WEEKEND_MODES:
                     self._weekend_mode = wm
+                if "slot_days" in rot:
+                    self._slot_days = self._clamp_slot_days(rot.get("slot_days"))
                 self._holidays = self._parse_holidays(rot.get("holidays", []))
                 swaps: Dict[str, int] = {}
                 raw_swaps = rot.get("temp_swaps")
@@ -1531,11 +1614,18 @@ class Plugin(CW2Plugin):
             else:
                 note = ""
 
+            # 轮次：步长 > 1 时同一组内多天共享一个「值日次数」
+            period = f"{slots + 1}"
+            if self._slot_days > 1:
+                pos, _ = self._slot_progress(day)
+                period += f"（{pos}/{self._slot_days}）"
+
             rows.append({
                 "date": day.isoformat(),
                 "weekday": self.WEEKDAY_CN[day.weekday()],
                 "group": group.name,
                 "members": members_text,
+                "period": period,
                 "note": note,
             })
         return rows
@@ -1547,10 +1637,13 @@ class Plugin(CW2Plugin):
         # utf-8-sig：Excel/WPS 直接打开中文不乱码
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["日期", "星期", "值日组", "成员（任务）", "备注"])
+            writer.writerow(["日期", "星期", "值日组", "成员（任务）", "备注", "轮次"])
             for r in rows:
                 writer.writerow(
-                    [r["date"], r["weekday"], r["group"], r["members"], r["note"]]
+                    [
+                        r["date"], r["weekday"], r["group"], r["members"],
+                        r["note"], r.get("period", ""),
+                    ]
                 )
 
     def _write_schedule_html(
@@ -1580,10 +1673,15 @@ class Plugin(CW2Plugin):
                 f"<td>{esc(r['weekday'])}</td>"
                 f"<td>{esc(r['group'])}</td>"
                 f"<td>{esc(r['members'])}</td>"
-                f"<td>{esc(r['note'])}</td></tr>"
+                f"<td>{esc(r['note'])}</td>"
+                f"<td>{esc(r.get('period', ''))}</td></tr>"
             )
 
         mode_label = self.MODE_LABELS.get(self._rotation_mode, "")
+        step = self._slot_days
+        if step > 1:
+            unit = "周" if self._rotation_mode == MODE_WEEKLY else "天"
+            mode_label = f"{mode_label}（每 {step} {unit}换一次）"
         generated = datetime.now().strftime("%Y-%m-%d %H:%M")
         doc = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1618,7 +1716,7 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
 ｜{esc(mode_label)}｜生成时间：{esc(generated)}
 </div>
 <table>
-<thead><tr><th>日期</th><th>星期</th><th>值日组</th><th>成员（任务）</th><th>备注</th></tr></thead>
+<thead><tr><th>日期</th><th>星期</th><th>值日组</th><th>成员（任务）</th><th>备注</th><th>轮次</th></tr></thead>
 <tbody>
 {os.linesep.join(body_rows)}
 </tbody>

@@ -294,6 +294,10 @@ Widget {
     function periodText() {
         if (!root.duty) return ""
         var n = root.duty.periodNumber
+        var step = root.duty.slotDays || 1
+        // 步长 > 1：两天（周）算一次值日，额外显示本档进度
+        if (step > 1)
+            return qsTr("第 %1 次（%2/%3）").arg(n).arg(root.duty.slotPosition || 1).arg(step)
         if (root.duty.rotationMode === "daily") return qsTr("第 %1 天").arg(n)
         if (root.duty.rotationMode === "workday") return qsTr("第 %1 轮").arg(n)
         return qsTr("第 %1 周").arg(n)

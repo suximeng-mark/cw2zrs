@@ -9,6 +9,7 @@
   2. 随机差分（优化后公式实现 vs 内嵌旧逐日实现，2000 组随机场景）
   3. _is_holiday / _find_holiday 与线性扫描的等价性
   4. 缓存失效（假期变化后 _invalidate_holiday_cache 生效）
+  5. 轮换步长 slot_days（两天算一次值日）与档内进度 _slot_progress
 """
 
 import random
@@ -110,7 +111,10 @@ _install_stubs()
 import main as m  # noqa: E402
 
 
-def make_plugin(mode: str, start: str, holidays: list, weekend_mode: str = "merge") -> "m.Plugin":
+def make_plugin(
+    mode: str, start: str, holidays: list, weekend_mode: str = "merge",
+    slot_days: int = 1,
+) -> "m.Plugin":
     """绕过 __init__ 构造最小可用的 Plugin（仅轮换相关字段）。"""
     p = object.__new__(m.Plugin)
     p._rotation_mode = mode
@@ -124,6 +128,7 @@ def make_plugin(mode: str, start: str, holidays: list, weekend_mode: str = "merg
     p._groups = []
     p._temp_swaps = {}
     p._weekend_mode = weekend_mode
+    p._slot_days = slot_days
     return p
 
 
@@ -340,10 +345,69 @@ def test_cache_invalidation() -> None:
     check("假期变化后重算", p._elapsed_slots(t), 5)
 
 
+def test_slot_days() -> None:
+    """轮换步长：每 N 个单位算一次值日；假期不占步长，档内进度正确。"""
+    # daily + 步长 2：01-01 起，第 1~2 天为第 1 次，第 3~4 天为第 2 次
+    p = make_plugin(m.MODE_DAILY, "2026-01-01", [], slot_days=2)
+    for day, want in [
+        (date(2026, 1, 1), 0), (date(2026, 1, 2), 0),
+        (date(2026, 1, 3), 1), (date(2026, 1, 4), 1),
+        (date(2026, 1, 5), 2), (date(2026, 1, 9), 4),
+    ]:
+        check(f"daily 步长2 {day}", p._elapsed_slots(day), want)
+    check("daily 步长2 档内进度",
+          [p._slot_progress(date(2026, 1, d)) for d in (1, 2, 3, 4, 5)],
+          [(1, 2), (2, 2), (1, 2), (2, 2), (1, 2)])
+
+    # 假期不推进轮换：01-03 假期 -> 01-02/01-04 才算满 2 个单位
+    p = make_plugin(m.MODE_DAILY, "2026-01-01", [
+        {"start": "2026-01-03", "end": "2026-01-03", "name": ""},
+    ], slot_days=2)
+    check("daily 步长2 跳过假期", p._elapsed_slots(date(2026, 1, 4)), 1)
+    # 01-02 为本档第 2 个单位；01-03 假期不占位；01-04 进入下一档的第 1 个单位
+    check("daily 步长2 假期后进度", p._slot_progress(date(2026, 1, 4)), (1, 2))
+
+    # weekly + 步长 2：每两周换一次
+    p = make_plugin(m.MODE_WEEKLY, "2026-01-01", [], slot_days=2)
+    check("weekly 步长2 第1周", p._elapsed_slots(date(2026, 1, 8)), 0)
+    check("weekly 步长2 第3周", p._elapsed_slots(date(2026, 1, 22)), 1)
+    check("weekly 步长2 第5周", p._elapsed_slots(date(2026, 2, 5)), 2)
+
+    # workday + 步长 2（周末合并计 1 档）：01-05 起，周一~周五 5 档 + 周六 1 档
+    p = make_plugin(m.MODE_WORKDAY, "2026-01-05", [], slot_days=2)
+    check("workday 步长2 到周日", p._elapsed_slots(date(2026, 1, 11)), 2)
+    check("workday 步长2 到下周一", p._elapsed_slots(date(2026, 1, 12)), 3)
+
+    # 步长 1 与旧行为完全一致（随机差分已覆盖，这里抽查两个点）
+    p1 = make_plugin(m.MODE_DAILY, "2026-01-01", [], slot_days=1)
+    p3 = make_plugin(m.MODE_DAILY, "2026-01-01", [], slot_days=3)
+    check("步长1 等于原始档数",
+          p1._elapsed_slots(date(2026, 1, 10)),
+          p1._compute_elapsed_slots(date(2026, 1, 1), date(2026, 1, 10)))
+    check("步长3 三倍跨度",
+          p3._elapsed_slots(date(2026, 1, 10)),
+          p1._compute_elapsed_slots(date(2026, 1, 1), date(2026, 1, 10)) // 3)
+
+    # 缓存：步长变化后同一天的结果必须失效重算
+    p = make_plugin(m.MODE_DAILY, "2026-01-01", [], slot_days=1)
+    check("缓存 步长1", p._elapsed_slots(date(2026, 1, 10)), 9)
+    p._slot_days = 2
+    check("缓存 步长2 重算", p._elapsed_slots(date(2026, 1, 10)), 4)
+
+    # 归一化：脏值/越界回退
+    check("clamp None", m.Plugin._clamp_slot_days(None), 1)
+    check("clamp 空串", m.Plugin._clamp_slot_days(""), 1)
+    check("clamp 非法", m.Plugin._clamp_slot_days("abc"), 1)
+    check("clamp 下界", m.Plugin._clamp_slot_days(0), 1)
+    check("clamp 上界", m.Plugin._clamp_slot_days(999), m.SLOT_DAYS_MAX)
+    check("clamp 字符串数字", m.Plugin._clamp_slot_days("2"), 2)
+
+
 def main() -> int:
     test_manual_cases()
     test_holiday_lookup_equiv()
     test_cache_invalidation()
+    test_slot_days()
     test_random_differential()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
