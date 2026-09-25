@@ -97,6 +97,12 @@ SLOT_DAYS_MAX = 12
 # 设置页下拉可选档位（覆盖日常使用，后端上限更宽以兼容旧备份）
 SLOT_DAYS_CHOICES = (1, 2, 3, 4, 5, 6)
 
+# 临时合并：月历上标记为「与次日合并」的日期，该日 + 次日合计 1 档（2 天算 1 个轮换日）。
+# 与常驻的 slot_days 区别在于它是**按日期的临时调整**，用完取消即可，不影响长期规则。
+MERGE_DAYS_LIMIT = 400
+# _units_to 的记忆化容量（按轮换指纹 + 日期缓存原始档数）
+UNITS_MEMO_LIMIT = 512
+
 # 首次安装时的内置示例分组
 DEFAULT_GROUPS_RAW = [
     {
@@ -174,6 +180,8 @@ class Plugin(CW2Plugin):
         self._weekend_mode: str = WEEKEND_MERGE
         # 轮换步长：每 N 个轮换单位（天/周）算一次值日，1=每单位轮换
         self._slot_days: int = DEFAULT_SLOT_DAYS
+        # 临时合并：升序 ISO 日期列表，标记日 + 次日合计 1 档
+        self._merge_days: List[str] = []
         self._manual_offset: int = 0
         # 临时调班：{date_iso: group_index}，仅覆盖当日自动轮换结果
         self._temp_swaps: Dict[str, int] = {}
@@ -194,6 +202,8 @@ class Plugin(CW2Plugin):
         self._history_timer.timeout.connect(self._flush_history)
         # _elapsed_slots 结果缓存：fingerprint + 日期 -> 档位数（OrderedDict 实现 LRU）
         self._slots_cache: "OrderedDict[tuple, int]" = OrderedDict()
+        # _units_to 记忆化：(轮换指纹, 日期) -> 原始累计档数，供临时合并判定复用
+        self._units_memo: "OrderedDict[tuple, int]" = OrderedDict()
         # 假期 fingerprint 缓存：仅当假期列表变化时重建（_elapsed_slots 每次调用无需重排序）
         self._holidays_fp: Optional[tuple] = None
         # 假期二分索引缓存（惰性构建，随 fingerprint 一起失效）
@@ -399,6 +409,9 @@ class Plugin(CW2Plugin):
         # 轮换步长：缺省/脏值回退 1（每单位轮换），保持旧配置行为不变
         self._slot_days = self._clamp_slot_days(data.get("slot_days"))
 
+        # 临时合并日期：非法日期直接丢弃，去重升序，超出上限时截断
+        self._merge_days = self._parse_merge_days(data.get("merge_days"))
+
         try:
             self._manual_offset = int(data.get("manual_offset", 0) or 0)
         except (ValueError, TypeError):
@@ -447,6 +460,7 @@ class Plugin(CW2Plugin):
             "rotation_mode": self._rotation_mode,
             "weekend_mode": self._weekend_mode,
             "slot_days": self._slot_days,
+            "merge_days": list(self._merge_days),
             "manual_offset": self._manual_offset,
             "temp_swaps": dict(self._temp_swaps),
             "settings": dict(self._settings),
@@ -509,6 +523,23 @@ class Plugin(CW2Plugin):
             return datetime.strptime(date_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return date.today()
+
+    @staticmethod
+    def _parse_merge_days(raw: Any) -> List[str]:
+        """临时合并日期归一化：只保留合法 ISO 日期，去重升序并截断。"""
+        if not isinstance(raw, list):
+            return []
+        valid = set()
+        for v in raw:
+            s = str(v or "").strip()
+            if not DATE_RE.fullmatch(s):
+                continue
+            try:  # 格式对了也可能是 2026-13-01 这种不存在的日期
+                date.fromisoformat(s)
+            except ValueError:
+                continue
+            valid.add(s)
+        return sorted(valid)[:MERGE_DAYS_LIMIT]
 
     @staticmethod
     def _clamp_slot_days(value: Any) -> int:
@@ -620,10 +651,11 @@ class Plugin(CW2Plugin):
         - workday：每个非假期工作日 +1；周末（六日）整体最多 +1
         - weekly：以起始日为锚点每 7 天为一周，整周都是假期才跳过
 
+        再扣掉临时合并（月历标记「与次日合并」的日期，两天合计 1 档），
         最后按轮换步长（slot_days）折算：每 N 个单位才算一次值日
         （N=2 即同一组连续值日 2 天/2 周后再轮换）。
 
-        结果按 (起始日期, 模式, 周末处理, 步长, 假期, 目标日期) 缓存，
+        结果按 (起始日期, 模式, 周末处理, 步长, 临时合并, 假期, 目标日期) 缓存，
         同一天的重复调用为 O(1)。
         """
         start = self._start_day
@@ -631,12 +663,9 @@ class Plugin(CW2Plugin):
         if today <= start:
             return 0
 
-        fingerprint = (
-            self._start_date,
-            self._rotation_mode,
-            self._weekend_mode,
+        fingerprint = self._rotation_fingerprint() + (
             self._slot_days,
-            self._holidays_fingerprint(),
+            tuple(self._merge_days),
             today.isoformat(),
         )
         cached = self._slots_cache.get(fingerprint)
@@ -644,12 +673,102 @@ class Plugin(CW2Plugin):
             self._slots_cache.move_to_end(fingerprint)
             return cached
 
-        units = self._compute_elapsed_slots(start, today)
+        units = self._units_elapsed(today)
         slots = units // self._slot_days if self._slot_days > 1 else units
         self._slots_cache[fingerprint] = slots
         if len(self._slots_cache) > SLOTS_CACHE_LIMIT:
             self._slots_cache.popitem(last=False)
         return slots
+
+    def _rotation_fingerprint(self) -> tuple:
+        """轮换规则的指纹（不含步长/临时合并/目标日期），供缓存与记忆化复用。"""
+        return (
+            self._start_date,
+            self._rotation_mode,
+            self._weekend_mode,
+            self._holidays_fingerprint(),
+        )
+
+    def _units_to(self, day: date) -> int:
+        """从起始日到 day（含）累计的原始档数（未扣合并、未除步长），带记忆化。"""
+        key = (self._rotation_fingerprint(), day)
+        memo = self._units_memo
+        value = memo.get(key)
+        if value is None:
+            value = (
+                self._compute_elapsed_slots(self._start_day, day)
+                if day > self._start_day
+                else 0
+            )
+            memo[key] = value
+            if len(memo) > UNITS_MEMO_LIMIT:
+                memo.popitem(last=False)
+        return value
+
+    def _counts_day(self, day: date) -> bool:
+        """该日是否贡献 1 档（与模式无关：按累计档数的增量判断）。"""
+        return self._units_to(day) - self._units_to(day - timedelta(days=1)) > 0
+
+    def _merge_reduction(self, start: date, today: date) -> int:
+        """临时合并扣减的档数：每个「标记日 + 次日」的有效配对少算 1 档。
+
+        配对规则：标记日与次日都必须是计档日（否则无从合并）；
+        已被上一对吸收的日期不能再作为新配对的起始日（避免 28/29/30 连标出错）。
+        """
+        if not self._merge_days:
+            return 0
+        one = timedelta(days=1)
+        reduction = 0
+        absorbed: set = set()
+        for iso in self._merge_days:
+            try:
+                mark = date.fromisoformat(iso)
+            except ValueError:
+                continue
+            if mark < start or mark > today:
+                continue
+            if mark in absorbed:
+                continue
+            nxt = mark + one
+            if nxt > today:
+                continue
+            if self._counts_day(mark) and self._counts_day(nxt):
+                reduction += 1
+                absorbed.add(nxt)
+        return reduction
+
+    def _merge_flag(self, day: date) -> str:
+        """某日在临时合并中的角色：head=合并起始日 / tail=被吸收的次日 / ''。
+
+        tail 优先判定：已被上一对吸收的日期不再作为新配对的起始日，
+        与 _merge_reduction 的扣减规则严格一致。
+        """
+        if not self._merge_days:
+            return ""
+        one = timedelta(days=1)
+        prev = day - one
+        if (
+            prev.isoformat() in self._merge_days
+            and self._counts_day(prev)
+            and self._counts_day(day)
+        ):
+            return "tail"
+        if (
+            day.isoformat() in self._merge_days
+            and self._counts_day(day)
+            and self._counts_day(day + one)
+        ):
+            return "head"
+        return ""
+
+    def _units_elapsed(self, today: date) -> int:
+        """(start, today] 内实际累计的轮换单位数（已扣临时合并，未除步长）。"""
+        start = self._start_day
+        if today <= start:
+            return 0
+        units = self._compute_elapsed_slots(start, today)
+        units -= self._merge_reduction(start, today)
+        return units if units > 0 else 0
 
     def _slot_progress(self, day: date) -> tuple:
         """当前这一「次值日」的进度：(档内第几个单位, 每档单位数)。
@@ -660,8 +779,7 @@ class Plugin(CW2Plugin):
         step = self._slot_days
         if step <= 1 or day <= self._start_day:
             return 1, step if step > 1 else 1
-        units = self._compute_elapsed_slots(self._start_day, day)
-        return units % step + 1, step
+        return self._units_elapsed(day) % step + 1, step
 
     def _compute_elapsed_slots(self, start: date, today: date) -> int:
         """按模式计算 (start, today] 内的轮换档数。
@@ -1056,6 +1174,37 @@ class Plugin(CW2Plugin):
         self._persist()
         logger.info(f"[值日生] 周末处理方式已保存：{mode}")
 
+    @Slot(result="QVariant")
+    def get_merge_days(self) -> List[str]:
+        """临时合并日期列表（升序 ISO）：标记日 + 次日合计 1 档。"""
+        return list(self._merge_days)
+
+    @Slot(str, bool, result=bool)
+    def set_merge_day(self, day: str, on: bool) -> bool:
+        """临时合并开关：on=True 标记该日与次日合并计 1 档，False 取消标记。
+
+        与常驻的轮换步长互不干扰：这里只改某一天，用完取消即可。
+        """
+        day = str(day or "").strip()
+        if not DATE_RE.fullmatch(day):
+            logger.error(f"[值日生] 临时合并日期无效：{day!r}")
+            return False
+        if on:
+            if day in self._merge_days:
+                return True
+            if len(self._merge_days) >= MERGE_DAYS_LIMIT:
+                logger.error(f"[值日生] 临时合并日期已达上限 {MERGE_DAYS_LIMIT}")
+                return False
+            self._merge_days = self._parse_merge_days(self._merge_days + [day])
+        else:
+            if day not in self._merge_days:
+                return True
+            self._merge_days = [d for d in self._merge_days if d != day]
+        self._slots_cache.clear()
+        self._persist()
+        logger.info(f"[值日生] 临时合并已{'标记' if on else '取消'}：{day}")
+        return True
+
     @Slot(result=int)
     def get_slot_days(self) -> int:
         """轮换步长：每 N 个轮换单位（天/周）算一次值日。"""
@@ -1376,6 +1525,7 @@ class Plugin(CW2Plugin):
                 "rotation_mode": self._rotation_mode,
                 "weekend_mode": self._weekend_mode,
                 "slot_days": self._slot_days,
+                "merge_days": list(self._merge_days),
                 "holidays": [
                     {"start": h.start, "end": h.end, "name": h.name}
                     for h in self._holidays
@@ -1419,6 +1569,7 @@ class Plugin(CW2Plugin):
             if wm in VALID_WEEKEND_MODES:
                 self._weekend_mode = wm
             self._slot_days = self._clamp_slot_days(data.get("slot_days"))
+            self._merge_days = self._parse_merge_days(data.get("merge_days"))
             self._groups = groups
             self._holidays = holidays
             self._manual_offset = 0
@@ -1459,6 +1610,7 @@ class Plugin(CW2Plugin):
                     "rotation_mode": self._rotation_mode,
                     "weekend_mode": self._weekend_mode,
                     "slot_days": self._slot_days,
+                    "merge_days": list(self._merge_days),
                     "holidays": self._build_config_payload()["holidays"],
                     "temp_swaps": dict(self._temp_swaps),
                 }
@@ -1505,6 +1657,7 @@ class Plugin(CW2Plugin):
                         "rotation_mode": data.get("rotation_mode", ""),
                         "weekend_mode": data.get("weekend_mode", ""),
                         "slot_days": data.get("slot_days", ""),
+                        "merge_days": data.get("merge_days", []),
                         "holidays": data.get("holidays", []),
                     },
                 }
@@ -1533,6 +1686,7 @@ class Plugin(CW2Plugin):
                     self._weekend_mode = wm
                 if "slot_days" in rot:
                     self._slot_days = self._clamp_slot_days(rot.get("slot_days"))
+                self._merge_days = self._parse_merge_days(rot.get("merge_days"))
                 self._holidays = self._parse_holidays(rot.get("holidays", []))
                 swaps: Dict[str, int] = {}
                 raw_swaps = rot.get("temp_swaps")
@@ -1613,6 +1767,12 @@ class Plugin(CW2Plugin):
                 note = "周末"
             else:
                 note = ""
+
+            merge_flag = self._merge_flag(day)
+            if merge_flag == "head":
+                note = f"{note} · 与次日合并" if note else "与次日合并"
+            elif merge_flag == "tail":
+                note = f"{note} · 与昨日合并" if note else "与昨日合并"
 
             # 轮次：步长 > 1 时同一组内多天共享一个「值日次数」
             period = f"{slots + 1}"
@@ -1732,7 +1892,8 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
         """返回覆盖某月的日历数据（前后补齐整周），供设置页月历使用。
 
         每天含：日期、日号、星期、是否当月/今日、假期名、是否临时调班、
-        当日组名与自动组名（调班时显示对比）。
+        当日组名与自动组名（调班时显示对比），以及临时合并标记
+        isMerge（与次日合并的起始日）/ isMergeTail（被吸收的次日）。
         """
         try:
             first = date(int(year), int(month), 1)
@@ -1763,6 +1924,8 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
                 "groupName": found[2].name if found else "",
                 "autoGroupName": self._groups[auto_idx].name if found else "",
                 "isSwap": bool(found and found[4]),
+                "isMerge": self._merge_flag(cur) == "head",
+                "isMergeTail": self._merge_flag(cur) == "tail",
             })
             cur += timedelta(days=1)
         return {"year": first.year, "month": first.month, "days": days}

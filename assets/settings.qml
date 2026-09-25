@@ -17,6 +17,7 @@ PluginPage {
     property string rotationMode: "weekly"
     property string weekendMode: "merge"
     property int slotDays: 1          // 轮换步长：每 N 个轮换单位算一次值日
+    property var mergeDays: []        // 临时合并：标记日 + 次日合计 1 档
     property var holidaysData: []
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": []}
@@ -205,6 +206,7 @@ PluginPage {
         root.rotationMode = root.backend.get_rotation_mode()
         root.weekendMode = root.backend.get_weekend_mode()
         root.slotDays = root.backend.get_slot_days()
+        root.mergeDays = root.backend.get_merge_days()
         root.holidaysData = root.clone(root.backend.get_holidays())
         root.loadDisplayData()
         root.loadReminderData()
@@ -358,6 +360,35 @@ PluginPage {
         var step = root.slotDays
         if (step <= 1) return qsTr("默认：每个轮换单位换一次")
         return qsTr("同一组连续值日 %1 %2后，再换下一组").arg(step).arg(root.slotUnit())
+    }
+
+    // ===== 临时合并（月历点选：该日与次日合并计 1 档）=====
+    function selectedMergeOn() {
+        return root.mergeDays.indexOf(root.selectedDate) >= 0
+    }
+
+    function selectedMergeWith() {
+        if (!root.selectedDate) return ""
+        var p = root.selectedDate.split("-")
+        var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]))
+        d.setDate(d.getDate() + 1)
+        function pad(n) { return String(n).padStart(2, "0") }
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+    }
+
+    function applyMerge(on) {
+        if (!root.backend || !root.selectedDate) return false
+        var ok = false
+        try {
+            ok = root.backend.set_merge_day(root.selectedDate, on)
+        } catch (e) {
+            console.error("[值日生] 临时合并保存失败: " + e)
+        }
+        if (!ok) return false
+        root.mergeDays = root.backend.get_merge_days()
+        root.refreshTodayStats()
+        root.loadMonth(root.calYear, root.calMonth)
+        return true
     }
 
     function applySlotDays(step) {
@@ -1483,6 +1514,14 @@ PluginPage {
                             Item { Layout.fillWidth: true }
                         }
 
+                        Label {
+                            Layout.fillWidth: true
+                            text: qsTr("点选日期可标记放假 / 临时调班 / 与次日合并计 1 档")
+                            opacity: 0.55
+                            font.pixelSize: 12
+                            wrapMode: Text.WordWrap
+                        }
+
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 7
@@ -1543,6 +1582,29 @@ PluginPage {
                                         color: "#E5A100"
                                     }
 
+                                    // 临时合并：右侧竖条=与次日合并的起始日，左侧浅竖条=被吸收的次日
+                                    Rectangle {
+                                        anchors.right: parent.right
+                                        anchors.rightMargin: 1
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 3
+                                        height: Math.max(10, parent.height - 14)
+                                        radius: 1.5
+                                        visible: !!calCell.modelData.isMerge
+                                        color: Colors.proxy.primaryColor
+                                    }
+                                    Rectangle {
+                                        anchors.left: parent.left
+                                        anchors.leftMargin: 1
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 3
+                                        height: Math.max(10, parent.height - 14)
+                                        radius: 1.5
+                                        opacity: 0.4
+                                        visible: !!calCell.modelData.isMergeTail
+                                        color: Colors.proxy.primaryColor
+                                    }
+
                                     TapHandler {
                                         onTapped: root.selectedDate = calCell.modelData.date
                                     }
@@ -1573,6 +1635,10 @@ PluginPage {
                                         if (info.holidayName) s += (s ? " · " : "") + info.holidayName
                                         if (info.isSwap && info.autoGroupName)
                                             s += (s ? " · " : "") + qsTr("原：") + info.autoGroupName
+                                        if (info.isMerge)
+                                            s += (s ? " · " : "") + qsTr("与次日合并")
+                                        else if (info.isMergeTail)
+                                            s += (s ? " · " : "") + qsTr("与昨日合并")
                                         return s
                                     }
                                     font.pixelSize: 12
@@ -1627,6 +1693,47 @@ PluginPage {
                                     }
                                 }
                                 Item { Layout.fillWidth: true }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                visible: root.rotationMode !== "weekly"
+
+                                CheckBox {
+                                    id: calMergeCheck
+                                    text: qsTr("该日与次日（%1）合并计 1 档").arg(root.selectedMergeWith())
+                                    checked: root.selectedMergeOn()
+                                    onToggled: {
+                                        var on = calMergeCheck.checked
+                                        if (!root.applyMerge(on)) {
+                                            calMergeCheck.checked = root.selectedMergeOn()
+                                            calResultText.text = qsTr("操作失败：日期无效或已达上限")
+                                            calResultText.color = "#E5594F"
+                                            return
+                                        }
+                                        calResultText.text = on
+                                              ? qsTr("已合并：%1 与 %2 合计 1 档 ").arg(root.selectedDate).arg(root.selectedMergeWith())
+                                                + root.saveStamp()
+                                              : qsTr("已取消合并 ") + root.saveStamp()
+                                        calResultText.color = "#2E7D32"
+                                    }
+                                }
+                                Label {
+                                    text: qsTr("临时生效：只影响这一天，用完取消即可")
+                                    opacity: 0.55
+                                    font.pixelSize: 12
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            Label {
+                                Layout.fillWidth: true
+                                visible: root.rotationMode === "weekly"
+                                text: qsTr("每周轮换以周为计档单位，不支持单日合并；如需两周一轮，请用上方的「值日步长」")
+                                opacity: 0.6
+                                font.pixelSize: 12
+                                wrapMode: Text.WordWrap
                             }
 
                             ResultText { id: calResultText }

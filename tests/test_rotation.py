@@ -113,7 +113,7 @@ import main as m  # noqa: E402
 
 def make_plugin(
     mode: str, start: str, holidays: list, weekend_mode: str = "merge",
-    slot_days: int = 1,
+    slot_days: int = 1, merge_days: list = None,
 ) -> "m.Plugin":
     """绕过 __init__ 构造最小可用的 Plugin（仅轮换相关字段）。"""
     p = object.__new__(m.Plugin)
@@ -129,6 +129,8 @@ def make_plugin(
     p._temp_swaps = {}
     p._weekend_mode = weekend_mode
     p._slot_days = slot_days
+    p._merge_days = list(merge_days or [])
+    p._units_memo = OrderedDict()
     return p
 
 
@@ -403,11 +405,80 @@ def test_slot_days() -> None:
     check("clamp 字符串数字", m.Plugin._clamp_slot_days("2"), 2)
 
 
+def test_merge_days() -> None:
+    """临时合并：月历标记「与次日合并」的日期，两天合计 1 档。"""
+    # 起始 03-02，第 1 天不计档：03-03..03-06 原本各计 1 档
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [])
+    check("合并前 03-06", p._elapsed_slots(date(2026, 3, 6)), 4)
+
+    # 标记 03-03 与次日合并 → 03-03/03-04 合计 1 档
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [], merge_days=["2026-03-03"])
+    check("合并 03-03 后 03-04", p._elapsed_slots(date(2026, 3, 4)), 1)
+    check("合并 03-03 后 03-06", p._elapsed_slots(date(2026, 3, 6)), 3)
+
+    # 起始日自身不计档，标记起始日不会额外扣减
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [], merge_days=["2026-03-02"])
+    check("标记起始日无扣减", p._elapsed_slots(date(2026, 3, 4)), 2)
+
+    # 连续标记 03-03/03-04：03-03+04 合并，03-04 已被吸收不能再开新对，03-05 正常
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [], merge_days=["2026-03-03", "2026-03-04"])
+    check("连续标记只扣一次", p._elapsed_slots(date(2026, 3, 5)), 2)
+
+    # 隔日标记 03-03 / 03-05：两对都成立
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [], merge_days=["2026-03-03", "2026-03-05"])
+    check("隔日标记扣两次", p._elapsed_slots(date(2026, 3, 6)), 2)
+
+    # 次日是假期 → 无从合并，不扣减
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [
+        {"start": "2026-03-04", "end": "2026-03-04", "name": ""},
+    ], merge_days=["2026-03-03"])
+    check("次日假期不合并", p._elapsed_slots(date(2026, 3, 6)), 3)
+
+    # 工作日轮换：周五 + 周六各计 1 档，合并后合计 1 档
+    p = make_plugin(m.MODE_WORKDAY, "2026-03-02", [], merge_days=["2026-03-06"])
+    check("workday 合并前 03-07",
+          make_plugin(m.MODE_WORKDAY, "2026-03-02", [])._elapsed_slots(date(2026, 3, 7)), 5)
+    check("workday 合并后 03-07", p._elapsed_slots(date(2026, 3, 7)), 4)
+
+    # 每周轮换：计档单位是周，单日标记不生效（不报错、不扣减）
+    p = make_plugin(m.MODE_WEEKLY, "2026-03-02", [], merge_days=["2026-03-04"])
+    check("weekly 单日标记无效", p._elapsed_slots(date(2026, 3, 23)), 3)
+
+    # 与步长叠加：先扣合并再除步长
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [], slot_days=2, merge_days=["2026-03-03"])
+    check("合并 + 步长2", p._elapsed_slots(date(2026, 3, 6)), 1)
+
+    # 角色标记：head / tail
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [], merge_days=["2026-03-03"])
+    check("flag head", p._merge_flag(date(2026, 3, 3)), "head")
+    check("flag tail", p._merge_flag(date(2026, 3, 4)), "tail")
+    check("flag 无关日", p._merge_flag(date(2026, 3, 5)), "")
+
+    # set_merge_day 开关
+    p = make_plugin(m.MODE_DAILY, "2026-03-02", [])
+    p._persist = lambda: None
+    check("set 非法日期", m.Plugin.set_merge_day(p, "2026-3-2", True), False)
+    check("set 标记", m.Plugin.set_merge_day(p, "2026-03-03", True), True)
+    check("标记后列表", p._merge_days, ["2026-03-03"])
+    check("重复标记幂等", m.Plugin.set_merge_day(p, "2026-03-03", True), True)
+    check("重复后仍一条", len(p._merge_days), 1)
+    check("set 取消", m.Plugin.set_merge_day(p, "2026-03-03", False), True)
+    check("取消后清空", p._merge_days, [])
+    check("取消不存在的日期", m.Plugin.set_merge_day(p, "2026-03-09", False), True)
+
+    # 归一化：去重升序、丢弃非法
+    check("parse 去重升序", m.Plugin._parse_merge_days(["2026-03-05", "2026-03-03", "2026-03-03"]),
+          ["2026-03-03", "2026-03-05"])
+    check("parse 丢非法", m.Plugin._parse_merge_days(["x", None, "2026-13-01"]), [])
+    check("parse 非列表", m.Plugin._parse_merge_days("2026-03-03"), [])
+
+
 def main() -> int:
     test_manual_cases()
     test_holiday_lookup_equiv()
     test_cache_invalidation()
     test_slot_days()
+    test_merge_days()
     test_random_differential()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
