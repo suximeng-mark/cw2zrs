@@ -72,6 +72,9 @@ PluginPage {
 
     // 编辑版本号：切换组/增删成员后强制刷新绑定
     property int editRev: 0
+    // 当前编辑的组索引（必须显式声明：Qt 6 里给未声明属性赋值会静默失败，
+    // 读取恒为 undefined，导致整页取不到组/成员数据）
+    property int currentGroupIndex: 0
 
     // 系统文件对话框：当前待执行动作 + 选中的路径
     property string fileDialogAction: ""    // exportConfig / exportBackup / importConfig / importBackup
@@ -234,7 +237,19 @@ PluginPage {
 
     function bumpEdit() { root.editRev++ }
 
+    // 分组数据整体替换后（加载 / 导入 / 删组），保证当前组索引仍在范围内
+    onGroupsDataChanged: root.clampGroupIndex()
+
     // ===== 分组/成员编辑 =====
+    // 组索引越界时收回（删组 / 导入配置后自动生效）
+    function clampGroupIndex() {
+        var n = root.groupsData.length
+        var i = root.currentGroupIndex
+        if (i >= n) i = n - 1
+        if (i < 0) i = 0
+        if (i !== root.currentGroupIndex) root.currentGroupIndex = i
+    }
+
     function groupNamesList() {
         root.editRev
         var out = []
@@ -281,9 +296,7 @@ PluginPage {
     function removeGroup(groupIndex) {
         var arr = root.groupsData.slice()
         arr.splice(groupIndex, 1)
-        root.groupsData = arr
-        if (root.currentGroupIndex >= arr.length)
-            root.currentGroupIndex = Math.max(0, arr.length - 1)
+        root.groupsData = arr          // onGroupsDataChanged 会收回越界索引
         root.bumpEdit()
     }
 
@@ -1101,7 +1114,7 @@ PluginPage {
                                 model: root.groupNamesList()
                                 currentIndex: root.currentGroupIndex
                                 onActivated: {
-                                    root.currentGroupIndex = index
+                                    root.currentGroupIndex = groupCombo.currentIndex
                                     root.bumpEdit()
                                 }
                             }
