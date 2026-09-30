@@ -40,10 +40,20 @@ split_commits = false
 commit_parsers = [
     { message = "^feat", group = "✨ 新亮点"},
     { message = "^fix", group = "🛠️ 修复的问题"},
+    { message = "^perf", group = "⚡ 性能优化"},
     { message = "^refactor", group = "🔃 功能重构"},
     { message = "^docs", group = "📄 文档更新"},
     { message = "^style", group = "🏞️ 样式优化"},
+    { message = "^test", group = "🧪 测试补充"},
+    { message = "^build", group = "📦 构建相关"},
+    { message = "^ci", group = "🤖 CI 配置"},
+    { message = "^revert", group = "⏪ 版本回退"},
+    { message = "^chore", group = "🧹 杂项维护"},
 ]
+# 注意：filter_unconventional = true 时会丢弃上面没匹配到的提交类型。
+# 若某个版本里的提交全部被丢弃，git-cliff 会整段跳过该版本，
+# release 正文就会「退回到上一个版本」（v1.9.10 就因只用了 perf 类型踩过），
+# 所以新增提交类型时必须同步在这里登记。
 protect_breaking_commits = false
 filter_commits = true
 topo_order = false
