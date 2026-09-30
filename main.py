@@ -94,8 +94,7 @@ VALID_WEEKEND_MODES = (WEEKEND_MERGE, WEEKEND_SKIP, WEEKEND_EACH)
 DEFAULT_SLOT_DAYS = 1
 SLOT_DAYS_MIN = 1
 SLOT_DAYS_MAX = 12
-# 设置页下拉可选档位（覆盖日常使用，后端上限更宽以兼容旧备份）
-SLOT_DAYS_CHOICES = (1, 2, 3, 4, 5, 6)
+# 注：设置页下拉的可选档位由 QML 的 slotDaysLabels() 提供，后端只做上下限校验
 
 # 临时合并：把指定的两个日期绑定为一对，这两天合计 1 档（2 天算 1 个轮换日）。
 # 与常驻的 slot_days 区别在于它是**按日期的临时调整**，用完取消即可，不影响长期规则；
@@ -210,6 +209,9 @@ class Plugin(CW2Plugin):
         self._slots_cache: "OrderedDict[tuple, int]" = OrderedDict()
         # _units_to 记忆化：(轮换指纹, 日期) -> 原始累计档数，供临时合并判定复用
         self._units_memo: "OrderedDict[tuple, int]" = OrderedDict()
+        # 临时合并的两个派生缓存：key 变化即自动失效，无需手工清理
+        self._merge_valid: Optional[tuple] = None    # 两端都计档的日期对
+        self._merge_index: Optional[tuple] = None    # {日期: 对方日期}
         # 假期 fingerprint 缓存：仅当假期列表变化时重建（_elapsed_slots 每次调用无需重排序）
         self._holidays_fp: Optional[tuple] = None
         # 假期二分索引缓存（惰性构建，随 fingerprint 一起失效）
@@ -433,19 +435,39 @@ class Plugin(CW2Plugin):
 
         self._holidays = self._parse_holidays(data.get("holidays", []))
         self._settings = self._normalize_settings(data.get("settings", {}))
-        raw_swaps = data.get("temp_swaps")
-        swaps: Dict[str, int] = {}
-        if isinstance(raw_swaps, dict):
-            for d, gi in raw_swaps.items():
-                if DATE_RE.fullmatch(str(d)):
-                    try:
-                        swaps[str(d)] = int(gi)
-                    except (ValueError, TypeError):
-                        continue
-        self._temp_swaps = swaps
+        self._temp_swaps = self._parse_temp_swaps(data.get("temp_swaps"))
         self._task_swaps = self._parse_task_swaps(data.get("task_swaps"))
         self._slots_cache.clear()
         self._invalidate_holiday_cache()
+
+    @staticmethod
+    def _coerce_index(value: Any) -> Optional[int]:
+        """把 QML 传来的下标归一化成 int；无法转换（含 bool / None / str）返回 None。
+
+        QML 在数据未就绪时可能传 undefined，直接参与比较会抛 TypeError 并中断
+        整个槽函数，因此所有接收下标的槽函数都先过这一层。
+        """
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_temp_swaps(raw: Any) -> Dict[str, int]:
+        """归一化临时调班 {date_iso: group_index}；丢弃非法日期与非整数组下标。"""
+        swaps: Dict[str, int] = {}
+        if not isinstance(raw, dict):
+            return swaps
+        for d, gi in raw.items():
+            if not DATE_RE.fullmatch(str(d)):
+                continue
+            try:
+                swaps[str(d)] = int(gi)
+            except (ValueError, TypeError):
+                continue
+        return swaps
 
     @staticmethod
     def _parse_task_swaps(raw: Any) -> Dict[str, Any]:
@@ -509,27 +531,39 @@ class Plugin(CW2Plugin):
             return None
         return payload if isinstance(payload, dict) else None
 
+    def _groups_payload(self) -> List[Dict[str, Any]]:
+        """分组的可序列化形式（配置、导出、备份共用）。"""
+        return [
+            {
+                "name": g.name,
+                "members": [
+                    {"name": m.name, "task": m.task}
+                    for m in g.members
+                ],
+            }
+            for g in self._groups
+        ]
+
+    def _holidays_payload(self) -> List[Dict[str, Any]]:
+        """假期的可序列化形式（配置、导出、备份共用）。"""
+        return [
+            {"start": h.start, "end": h.end, "name": h.name}
+            for h in self._holidays
+        ]
+
+    def _merge_pairs_payload(self) -> List[Dict[str, str]]:
+        """临时合并日期对的可序列化形式。"""
+        return [{"a": a, "b": b} for a, b in self._merge_pairs]
+
     def _build_config_payload(self) -> Dict[str, Any]:
         return {
-            "groups": [
-                {
-                    "name": g.name,
-                    "members": [
-                        {"name": m.name, "task": m.task}
-                        for m in g.members
-                    ],
-                }
-                for g in self._groups
-            ],
-            "holidays": [
-                {"start": h.start, "end": h.end, "name": h.name}
-                for h in self._holidays
-            ],
+            "groups": self._groups_payload(),
+            "holidays": self._holidays_payload(),
             "start_date": self._start_date,
             "rotation_mode": self._rotation_mode,
             "weekend_mode": self._weekend_mode,
             "slot_days": self._slot_days,
-            "merge_pairs": [{"a": a, "b": b} for a, b in self._merge_pairs],
+            "merge_pairs": self._merge_pairs_payload(),
             "manual_offset": self._manual_offset,
             "temp_swaps": dict(self._temp_swaps),
             "task_swaps": self._task_swaps_payload(),
@@ -774,7 +808,7 @@ class Plugin(CW2Plugin):
         - workday：每个非假期工作日 +1；周末（六日）整体最多 +1
         - weekly：以起始日为锚点每 7 天为一周，整周都是假期才跳过
 
-        再扣掉临时合并（月历标记「与次日合并」的日期，两天合计 1 档），
+        再扣掉临时合并（任意两天配成的日期对，一对合计 1 档），
         最后按轮换步长（slot_days）折算：每 N 个单位才算一次值日
         （N=2 即同一组连续值日 2 天/2 周后再轮换）。
 
@@ -817,20 +851,45 @@ class Plugin(CW2Plugin):
         key = (self._rotation_fingerprint(), day)
         memo = self._units_memo
         value = memo.get(key)
-        if value is None:
-            value = (
-                self._compute_elapsed_slots(self._start_day, day)
-                if day > self._start_day
-                else 0
-            )
-            memo[key] = value
-            if len(memo) > UNITS_MEMO_LIMIT:
-                memo.popitem(last=False)
+        if value is not None:
+            memo.move_to_end(key)  # 命中也要刷新 LRU 顺序，否则热点会被误淘汰
+            return value
+        value = (
+            self._compute_elapsed_slots(self._start_day, day)
+            if day > self._start_day
+            else 0
+        )
+        memo[key] = value
+        if len(memo) > UNITS_MEMO_LIMIT:
+            memo.popitem(last=False)
         return value
 
     def _counts_day(self, day: date) -> bool:
         """该日是否贡献 1 档（与模式无关：按累计档数的增量判断）。"""
         return self._units_to(day) - self._units_to(day - timedelta(days=1)) > 0
+
+    def _valid_merge_pairs(self) -> List[tuple]:
+        """两端都计档的临时合并对（已解析为 date，保持配置中的顺序）。
+
+        「是否计档」只取决于配置、与查询日期无关，所以整月 42 天只需算一次；
+        之前每天都要对每一对重复做日期解析 + 4 次 _units_to，是月历的主要热点。
+        顺序必须保持配置顺序：used 集合按此顺序分配，重排会改变扣减结果。
+        """
+        key = (self._rotation_fingerprint(), tuple(self._merge_pairs))
+        cached = self._merge_valid
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        pairs: List[tuple] = []
+        for a_iso, b_iso in self._merge_pairs:
+            try:
+                a, b = date.fromisoformat(a_iso), date.fromisoformat(b_iso)
+            except ValueError:
+                continue
+            if self._counts_day(a) and self._counts_day(b):
+                pairs.append((a, b))
+        self._merge_valid = (key, pairs)
+        return pairs
 
     def _merge_reduction(self, start: date, today: date) -> int:
         """临时合并扣减的档数：每一对有效日期合计 1 档，故总档数 -1。
@@ -842,28 +901,34 @@ class Plugin(CW2Plugin):
             return 0
         reduction = 0
         used: set = set()
-        for a_iso, b_iso in self._merge_pairs:  # 已按 (A, B) 升序
-            try:
-                a, b = date.fromisoformat(a_iso), date.fromisoformat(b_iso)
-            except ValueError:
-                continue
+        for a, b in self._valid_merge_pairs():  # 已按 (A, B) 升序、且两端都计档
             if b > today or a in used or b in used:
                 continue
-            if self._counts_day(a) and self._counts_day(b):
-                reduction += 1
-                used.add(a)
-                used.add(b)
+            reduction += 1
+            used.add(a)
+            used.add(b)
         return reduction
+
+    def _merge_partner_map(self) -> Dict[str, str]:
+        """{日期 ISO: 对方日期 ISO} 索引，供月历与排班表 O(1) 查询。
+
+        之前 _merge_partner 对每个日期都要线性扫描全部日期对，
+        排班表 182 天 × 200 对 = 3.6 万次字符串比较。
+        """
+        key = tuple(self._merge_pairs)
+        cached = self._merge_index
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        index: Dict[str, str] = {}
+        for a, b in self._merge_pairs:
+            index[a] = b
+            index[b] = a
+        self._merge_index = (key, index)
+        return index
 
     def _merge_partner(self, day: date) -> str:
         """该日已与哪一天合并（返回对方 ISO 日期；未合并返回空串）。"""
-        iso = day.isoformat()
-        for a, b in self._merge_pairs:
-            if a == iso:
-                return b
-            if b == iso:
-                return a
-        return ""
+        return self._merge_partner_map().get(day.isoformat(), "")
 
     def _units_elapsed(self, today: date) -> int:
         """(start, today] 内实际累计的轮换单位数（已扣临时合并，未除步长）。"""
@@ -1644,25 +1709,13 @@ class Plugin(CW2Plugin):
                 return {"ok": False, "msg": "路径不能为空"}
 
             data = {
-                "groups": [
-                    {
-                        "name": g.name,
-                        "members": [
-                            {"name": m.name, "task": m.task}
-                            for m in g.members
-                        ],
-                    }
-                    for g in self._groups
-                ],
+                "groups": self._groups_payload(),
                 "start_date": self._start_date,
                 "rotation_mode": self._rotation_mode,
                 "weekend_mode": self._weekend_mode,
                 "slot_days": self._slot_days,
-                "merge_pairs": [{"a": a, "b": b} for a, b in self._merge_pairs],
-                "holidays": [
-                    {"start": h.start, "end": h.end, "name": h.name}
-                    for h in self._holidays
-                ],
+                "merge_pairs": self._merge_pairs_payload(),
+                "holidays": self._holidays_payload(),
             }
 
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1737,15 +1790,15 @@ class Plugin(CW2Plugin):
             if include_display:
                 sections["display"] = dict(self._settings)
             if include_people:
-                sections["groups"] = self._build_config_payload()["groups"]
+                sections["groups"] = self._groups_payload()
             if include_rotation:
                 sections["rotation"] = {
                     "start_date": self._start_date,
                     "rotation_mode": self._rotation_mode,
                     "weekend_mode": self._weekend_mode,
                     "slot_days": self._slot_days,
-                    "merge_pairs": [{"a": a, "b": b} for a, b in self._merge_pairs],
-                    "holidays": self._build_config_payload()["holidays"],
+                    "merge_pairs": self._merge_pairs_payload(),
+                    "holidays": self._holidays_payload(),
                     "temp_swaps": dict(self._temp_swaps),
                     "task_swaps": self._task_swaps_payload(),
                 }
@@ -1823,16 +1876,7 @@ class Plugin(CW2Plugin):
                     self._slot_days = self._clamp_slot_days(rot.get("slot_days"))
                 self._merge_pairs = self._parse_merge_pairs(rot.get("merge_pairs"))
                 self._holidays = self._parse_holidays(rot.get("holidays", []))
-                swaps: Dict[str, int] = {}
-                raw_swaps = rot.get("temp_swaps")
-                if isinstance(raw_swaps, dict):
-                    for d, gi in raw_swaps.items():
-                        if DATE_RE.fullmatch(str(d)):
-                            try:
-                                swaps[str(d)] = int(gi)
-                            except (ValueError, TypeError):
-                                continue
-                self._temp_swaps = swaps
+                self._temp_swaps = self._parse_temp_swaps(rot.get("temp_swaps"))
                 self._task_swaps = self._parse_task_swaps(rot.get("task_swaps"))
                 applied.append("轮换配置及方式")
 
@@ -2048,6 +2092,7 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
         while cur <= grid_end:
             found = self._actual_group_for_day(cur)
             auto_idx = found[3] if found else 0
+            partner = self._merge_partner(cur)  # 只查一次：内部要遍历全部日期对
             days.append({
                 "date": cur.isoformat(),
                 "day": cur.day,
@@ -2058,8 +2103,8 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
                 "groupName": found[2].name if found else "",
                 "autoGroupName": self._groups[auto_idx].name if found else "",
                 "isSwap": bool(found and found[4]),
-                "isMerge": bool(self._merge_partner(cur)),
-                "mergeWith": self._merge_partner(cur),
+                "isMerge": bool(partner),
+                "mergeWith": partner,
             })
             cur += timedelta(days=1)
         return {"year": first.year, "month": first.month, "days": days}
@@ -2119,6 +2164,9 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
         n = len(self._groups)
         if n == 0:
             return False
+        group_index = self._coerce_index(group_index)
+        if group_index is None:
+            return False
         if group_index < 0:
             self._temp_swaps.pop(iso, None)
         else:
@@ -2154,6 +2202,11 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
 
         基于成员的**原始**任务对调；若两人已处于对调状态，再点一次即还原。
         """
+        member_a = self._coerce_index(member_a)
+        member_b = self._coerce_index(member_b)
+        if member_a is None or member_b is None:
+            logger.error(f"[值日生] 临时互换成员下标无效：{member_a} / {member_b}")
+            return False
         ctx = self._task_swap_context()
         if ctx is None:
             return False
@@ -2199,6 +2252,10 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
     @Slot(int, str, result=bool)
     def set_member_task(self, member_index: int, task: str) -> bool:
         """临时把某成员的任务改成 task（当轮有效）；task 为空串表示恢复原任务。"""
+        member_index = self._coerce_index(member_index)
+        if member_index is None:
+            logger.error(f"[值日生] 临时改任务成员下标无效：{member_index}")
+            return False
         ctx = self._task_swap_context()
         if ctx is None:
             return False

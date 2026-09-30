@@ -131,6 +131,8 @@ def make_plugin(
     p._slot_days = slot_days
     p._merge_pairs = m.Plugin._parse_merge_pairs(merge_pairs or [])
     p._units_memo = OrderedDict()
+    p._merge_valid = None
+    p._merge_index = None
     return p
 
 

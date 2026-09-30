@@ -111,6 +111,14 @@ PluginPage {
         return JSON.parse(JSON.stringify(o))
     }
 
+    // 结果提示统一出口：各处不再重复写 text + color 两行
+    // ok=true 绿色（成功）/ false 红色（失败）
+    function setResult(target, msg, ok) {
+        if (!target) return
+        target.text = msg
+        target.color = ok ? "#2E7D32" : "#E5594F"
+    }
+
     // ===== 系统文件对话框 =====
     // file:///C:/a/b.json → C:/a/b.json（并还原中文/空格转义）
     function urlToLocalPath(u) {
@@ -190,8 +198,7 @@ PluginPage {
             root.reminderEnabled, root.reminderTime, root.reminderSkipHoliday
         )
         if (ok) {
-            reminderResultText.text = qsTr("保存成功 ") + root.saveStamp()
-            reminderResultText.color = "#2E7D32"
+            root.setResult(reminderResultText, qsTr("保存成功 ") + root.saveStamp(), true)
         } else {
             var d = root.backend.get_reminder_settings()
             if (d) {
@@ -199,16 +206,14 @@ PluginPage {
                 root.reminderTime = d.time || "07:30"
                 root.reminderSkipHoliday = d.skipHoliday !== false
             }
-            reminderResultText.text = qsTr("保存失败：时间格式需为 HH:MM（24 小时制），如 07:30")
-            reminderResultText.color = "#E5594F"
+            root.setResult(reminderResultText, qsTr("保存失败：时间格式需为 HH:MM（24 小时制），如 07:30"), false)
         }
     }
 
     function testReminder() {
         if (!root.backend) return
         var r = root.backend.test_reminder()
-        reminderResultText.text = r.msg
-        reminderResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+        root.setResult(reminderResultText, r.msg, r.ok)
     }
 
     // ===== 数据加载 =====
@@ -279,11 +284,6 @@ PluginPage {
                + (d.taskSwapActive ? " · " + qsTr("本轮已调整") : "")
     }
 
-    function reportTaskSwap(msg, ok) {
-        taskSwapResultText.text = msg
-        taskSwapResultText.color = ok ? "#2E7D32" : "#E5594F"
-    }
-
     function reloadTaskSwaps() {
         root.refreshTodayStats()
         root.bumpEdit()
@@ -297,7 +297,7 @@ PluginPage {
         } catch (e) {
             console.error("[值日生] 临时任务对调失败: " + e)
         }
-        root.reportTaskSwap(ok ? qsTr("已对调任务 ") + root.saveStamp() : qsTr("对调失败"), ok)
+        root.setResult(taskSwapResultText, ok ? qsTr("已对调任务 ") + root.saveStamp() : qsTr("对调失败"), ok)
         if (ok) root.reloadTaskSwaps()
     }
 
@@ -312,21 +312,21 @@ PluginPage {
         var msg = text.trim()
                   ? qsTr("本轮任务已更新 ") + root.saveStamp()
                   : qsTr("已恢复原任务 ") + root.saveStamp()
-        root.reportTaskSwap(ok ? msg : qsTr("保存失败"), ok)
+        root.setResult(taskSwapResultText, ok ? msg : qsTr("保存失败"), ok)
         if (ok) root.reloadTaskSwaps()
     }
 
     function resetTaskAt(i) {
         if (!root.backend) return
         var ok = root.backend.reset_member_task(i)
-        root.reportTaskSwap(ok ? qsTr("已恢复原任务 ") + root.saveStamp() : qsTr("恢复失败"), ok)
+        root.setResult(taskSwapResultText, ok ? qsTr("已恢复原任务 ") + root.saveStamp() : qsTr("恢复失败"), ok)
         if (ok) root.reloadTaskSwaps()
     }
 
     function clearAllTaskSwaps() {
         if (!root.backend) return
         var ok = root.backend.clear_task_swaps()
-        root.reportTaskSwap(ok ? qsTr("已全部恢复 ") + root.saveStamp() : qsTr("恢复失败"), ok)
+        root.setResult(taskSwapResultText, ok ? qsTr("已全部恢复 ") + root.saveStamp() : qsTr("恢复失败"), ok)
         if (ok) root.reloadTaskSwaps()
     }
 
@@ -443,13 +443,11 @@ PluginPage {
             console.error("[值日生] 周末处理方式保存失败: " + e)
         }
         if (!ok) {
-            rotationResultText.text = qsTr("保存失败：周末处理方式无效")
-            rotationResultText.color = "#E5594F"
+            root.setResult(rotationResultText, qsTr("保存失败：周末处理方式无效"), false)
             return
         }
         root.weekendMode = mode
-        rotationResultText.text = qsTr("周末处理已保存 ") + root.saveStamp()
-        rotationResultText.color = "#2E7D32"
+        root.setResult(rotationResultText, qsTr("周末处理已保存 ") + root.saveStamp(), true)
         root.refreshTodayStats()
         root.loadMonth(root.calYear, root.calMonth)
     }
@@ -540,8 +538,7 @@ PluginPage {
         if (!root.selectedDate) return
         root.mergePicking = !root.mergePicking
         if (root.mergePicking) {
-            calResultText.text = qsTr("请再点选月历上的另一天，与其合并计 1 档")
-            calResultText.color = "#2E7D32"
+            root.setResult(calResultText, qsTr("请再点选月历上的另一天，与其合并计 1 档"), true)
         }
     }
 
@@ -549,18 +546,14 @@ PluginPage {
     function mergeSelectedWith(partner) {
         if (!root.selectedDate || !partner) return false
         if (partner === root.selectedDate) {
-            calResultText.text = qsTr("不能与同一天合并")
-            calResultText.color = "#E5594F"
+            root.setResult(calResultText, qsTr("不能与同一天合并"), false)
             return false
         }
         if (!root.applyMergePair(partner)) {
-            calResultText.text = qsTr("合并失败：该日期已在其他配对中，或已达上限")
-            calResultText.color = "#E5594F"
+            root.setResult(calResultText, qsTr("合并失败：该日期已在其他配对中，或已达上限"), false)
             return false
         }
-        calResultText.text = qsTr("已合并：%1 与 %2 合计 1 档 ")
-                             .arg(root.selectedDate).arg(partner) + root.saveStamp()
-        calResultText.color = "#2E7D32"
+        root.setResult(calResultText, qsTr("已合并：%1 与 %2 合计 1 档 ").arg(root.selectedDate).arg(partner) + root.saveStamp(), true)
         root.mergePicking = false
         return true
     }
@@ -589,14 +582,11 @@ PluginPage {
             console.error("[值日生] 轮换步长保存失败: " + e)
         }
         if (!ok) {
-            rotationResultText.text = qsTr("保存失败：轮换步长无效")
-            rotationResultText.color = "#E5594F"
+            root.setResult(rotationResultText, qsTr("保存失败：轮换步长无效"), false)
             return
         }
         root.slotDays = step
-        rotationResultText.text = qsTr("轮换步长已保存：每 %1 %2换一次 ").arg(step).arg(root.slotUnit())
-                                  + root.saveStamp()
-        rotationResultText.color = "#2E7D32"
+        root.setResult(rotationResultText, qsTr("轮换步长已保存：每 %1 %2换一次 ").arg(step).arg(root.slotUnit()) + root.saveStamp(), true)
         root.refreshTodayStats()
         root.loadMonth(root.calYear, root.calMonth)
     }
@@ -1217,8 +1207,7 @@ PluginPage {
                                 onClicked: {
                                     root.doSave()
                                     root.refreshTodayStats()
-                                    peopleResultText.text = qsTr("保存成功 ") + root.saveStamp()
-                                    peopleResultText.color = "#2E7D32"
+                                    root.setResult(peopleResultText, qsTr("保存成功 ") + root.saveStamp(), true)
                                 }
                             }
                         }
@@ -1263,8 +1252,7 @@ PluginPage {
                                     root.doSave()
                                     root.refreshTodayStats()
                                     root.bumpEdit()
-                                    groupResultText.text = qsTr("组名已更新 ") + root.saveStamp()
-                                    groupResultText.color = "#2E7D32"
+                                    root.setResult(groupResultText, qsTr("组名已更新 ") + root.saveStamp(), true)
                                 }
                             }
 
@@ -1427,8 +1415,7 @@ PluginPage {
                                     root.rotationMode = "daily"
                                     root.doSave()
                                     root.refreshTodayStats()
-                                    rotationResultText.text = qsTr("已切换为每日轮换 ") + root.saveStamp()
-                                    rotationResultText.color = "#2E7D32"
+                                    root.setResult(rotationResultText, qsTr("已切换为每日轮换 ") + root.saveStamp(), true)
                                 }
                             }
                             RadioButton {
@@ -1439,8 +1426,7 @@ PluginPage {
                                     root.rotationMode = "workday"
                                     root.doSave()
                                     root.refreshTodayStats()
-                                    rotationResultText.text = qsTr("已切换为工作日轮换 ") + root.saveStamp()
-                                    rotationResultText.color = "#2E7D32"
+                                    root.setResult(rotationResultText, qsTr("已切换为工作日轮换 ") + root.saveStamp(), true)
                                 }
                             }
                             RadioButton {
@@ -1451,8 +1437,7 @@ PluginPage {
                                     root.rotationMode = "weekly"
                                     root.doSave()
                                     root.refreshTodayStats()
-                                    rotationResultText.text = qsTr("已切换为每周轮换 ") + root.saveStamp()
-                                    rotationResultText.color = "#2E7D32"
+                                    root.setResult(rotationResultText, qsTr("已切换为每周轮换 ") + root.saveStamp(), true)
                                 }
                             }
                         }
@@ -1507,7 +1492,7 @@ PluginPage {
 
                 SettingCard {
                     Layout.fillWidth: true
-                    icon.name: "ic_fluent_calendar_start_20_regular"
+                    icon.name: "ic_fluent_calendar_week_start_20_regular"
                     title: qsTr("轮换起始日期")
                     description: qsTr("轮换从此日期开始计数；失焦或回车自动保存")
 
@@ -1527,11 +1512,9 @@ PluginPage {
                                     if (root.validDate(root.startDateText)) {
                                         root.doSave()
                                         root.refreshTodayStats()
-                                        startResultText.text = qsTr("保存成功 ") + root.saveStamp()
-                                        startResultText.color = "#2E7D32"
+                                        root.setResult(startResultText, qsTr("保存成功 ") + root.saveStamp(), true)
                                     } else {
-                                        startResultText.text = qsTr("日期格式应为 YYYY-MM-DD")
-                                        startResultText.color = "#E5594F"
+                                        root.setResult(startResultText, qsTr("日期格式应为 YYYY-MM-DD"), false)
                                     }
                                 }
                             }
@@ -1546,8 +1529,7 @@ PluginPage {
                                     startField.text = root.startDateText
                                     root.doSave()
                                     root.refreshTodayStats()
-                                    startResultText.text = qsTr("已设为今天 ") + root.saveStamp()
-                                    startResultText.color = "#2E7D32"
+                                    root.setResult(startResultText, qsTr("已设为今天 ") + root.saveStamp(), true)
                                 }
                             }
 
@@ -1602,8 +1584,7 @@ PluginPage {
                                         holidayEndField.text.trim(),
                                         holidayNameField.text.trim()
                                     )
-                                    holidayResultText.text = ok ? qsTr("已添加假期") : qsTr("添加失败：日期格式应为 YYYY-MM-DD")
-                                    holidayResultText.color = ok ? "#2E7D32" : "#E5594F"
+                                    root.setResult(holidayResultText, ok ? qsTr("已添加假期") : qsTr("添加失败：日期格式应为 YYYY-MM-DD"), ok)
                                     if (ok) {
                                         holidayStartField.text = ""
                                         holidayEndField.text = ""
@@ -1839,14 +1820,10 @@ PluginPage {
                                         var ok = root.toggleSelectedHoliday()
                                         if (!ok) {
                                             calHolidayCheck.checked = root.selectedHasSingleHoliday()
-                                            calResultText.text = root.selectedCoveredByRange()
-                                                  ? qsTr("该日在多日假期内，请在上方假期列表中调整")
-                                                  : qsTr("操作失败")
-                                            calResultText.color = "#E5594F"
+                                            root.setResult(calResultText, root.selectedCoveredByRange() ? qsTr("该日在多日假期内，请在上方假期列表中调整") : qsTr("操作失败"), false)
                                             return
                                         }
-                                        calResultText.text = qsTr("已更新 ") + root.saveStamp()
-                                        calResultText.color = "#2E7D32"
+                                        root.setResult(calResultText, qsTr("已更新 ") + root.saveStamp(), true)
                                     }
                                 }
 
@@ -1860,16 +1837,14 @@ PluginPage {
                                     text: qsTr("应用调班")
                                     onClicked: {
                                         var ok = root.applyTempSwap(root.selectedDate, calSwapCombo.currentIndex)
-                                        calResultText.text = ok ? qsTr("已设置调班 ") + root.saveStamp() : qsTr("设置失败：请先新建分组")
-                                        calResultText.color = ok ? "#2E7D32" : "#E5594F"
+                                        root.setResult(calResultText, ok ? qsTr("已设置调班 ") + root.saveStamp() : qsTr("设置失败：请先新建分组"), ok)
                                     }
                                 }
                                 Button {
                                     text: qsTr("清除调班")
                                     onClicked: {
                                         var ok = root.applyTempSwap(root.selectedDate, -1)
-                                        calResultText.text = ok ? qsTr("已清除调班") : qsTr("清除失败")
-                                        calResultText.color = ok ? "#2E7D32" : "#E5594F"
+                                        root.setResult(calResultText, ok ? qsTr("已清除调班") : qsTr("清除失败"), ok)
                                     }
                                 }
                                 Item { Layout.fillWidth: true }
@@ -1905,8 +1880,7 @@ PluginPage {
                                     visible: root.selectedIsMerged()
                                     onClicked: {
                                         var ok = root.clearMergeAt(root.selectedDate)
-                                        calResultText.text = ok ? qsTr("已取消合并 ") + root.saveStamp() : qsTr("取消失败")
-                                        calResultText.color = ok ? "#2E7D32" : "#E5594F"
+                                        root.setResult(calResultText, ok ? qsTr("已取消合并 ") + root.saveStamp() : qsTr("取消失败"), ok)
                                     }
                                 }
                             }
@@ -1930,8 +1904,7 @@ PluginPage {
                                     onClicked: {
                                         var partner = mergePartnerField.text.trim()
                                         if (!root.validDate(partner)) {
-                                            calResultText.text = qsTr("日期格式应为 YYYY-MM-DD")
-                                            calResultText.color = "#E5594F"
+                                            root.setResult(calResultText, qsTr("日期格式应为 YYYY-MM-DD"), false)
                                             return
                                         }
                                         root.mergeSelectedWith(partner)
@@ -2853,17 +2826,13 @@ PluginPage {
 
             if (root.fileDialogAction === "exportConfig") {
                 var r = root.backend.export_config(p)
-                configTableResultText.text = r.ok ? qsTr("已导出到：") + r.msg
-                                                  : qsTr("导出失败：") + r.msg
-                configTableResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                root.setResult(configTableResultText, r.ok ? qsTr("已导出到：") + r.msg : qsTr("导出失败：") + r.msg, r.ok)
             } else if (root.fileDialogAction === "exportBackup") {
                 var rb = root.backend.export_backup(
                     p, root.backupDisplay, root.backupPeople,
                     root.backupRotation, root.backupHistory
                 )
-                backupResultText.text = rb.ok ? qsTr("已导出到：") + rb.msg
-                                              : qsTr("导出失败：") + rb.msg
-                backupResultText.color = rb.ok ? "#2E7D32" : "#E5594F"
+                root.setResult(backupResultText, rb.ok ? qsTr("已导出到：") + rb.msg : qsTr("导出失败：") + rb.msg, rb.ok)
             }
             root.fileDialogAction = ""
         }
@@ -2890,8 +2859,7 @@ PluginPage {
                     p, root.backupDisplay, root.backupPeople,
                     root.backupRotation, root.backupHistory
                 )
-                backupResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
-                backupResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                root.setResult(backupResultText, r.ok ? r.msg : qsTr("导入失败：") + r.msg, r.ok)
                 if (r.ok) root.loadData()
             }
             root.fileDialogAction = ""
@@ -2912,8 +2880,7 @@ PluginPage {
             var r = root.backend.export_schedule(root.pendingWeeks, p)
             var sink = root.scheduleSink === "configTable" ? configTableResultText
                                                            : scheduleResultText
-            sink.text = r.ok ? r.msg : qsTr("导出失败：") + r.msg
-            sink.color = r.ok ? "#2E7D32" : "#E5594F"
+            root.setResult(sink, r.ok ? r.msg : qsTr("导出失败：") + r.msg, r.ok)
         }
     }
 
@@ -2975,8 +2942,7 @@ PluginPage {
                     highlighted: true
                     onClicked: {
                         var r = root.backend.import_config(root.pendingImportPath)
-                        configTableResultText.text = r.ok ? r.msg : qsTr("导入失败：") + r.msg
-                        configTableResultText.color = r.ok ? "#2E7D32" : "#E5594F"
+                        root.setResult(configTableResultText, r.ok ? r.msg : qsTr("导入失败：") + r.msg, r.ok)
                         if (r.ok) root.loadData()
                         importConfigPopup.close()
                     }

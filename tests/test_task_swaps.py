@@ -93,46 +93,61 @@ def today_tasks(p):
     ]
 
 
+def base_tasks(p):
+    """今日组的**原始**任务列表。
+
+    今天轮到哪一组由轮换决定（跨天会变），断言必须基于实际命中的组，
+    不能写死第一组，否则隔天就会误报。
+    """
+    return [x["origTask"] for x in m.Plugin.get_today_duty(p)["members"]]
+
+
 def test_basic() -> None:
+    # 两组都给 3 人：无论今天轮到哪一组，互换 0/1 都成立
     p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板"), ("王五", "倒垃圾")],
-                     [("赵六", "拖地")]])
+                     [("赵六", "拖地"), ("孙七", "擦窗"), ("周八", "排桌椅")]])
+    base = base_tasks(p)
+    check("今日组有 3 人", len(base), 3)
 
     # 无调整时：任务即原始任务，swapped 全 False
     active, tasks, rows = today_tasks(p)
     check("初始未生效", active, False)
-    check("初始任务", tasks, ["扫地", "擦黑板", "倒垃圾"])
+    check("初始任务", tasks, base)
     check("初始 swapped", [r[2] for r in rows], [False, False, False])
-    check("origTask 保留", [r[1] for r in rows], ["扫地", "擦黑板", "倒垃圾"])
+    check("origTask 保留", [r[1] for r in rows], base)
 
     # 互换 0 与 1
     check("互换成功", m.Plugin.swap_member_tasks(p, 0, 1), True)
     active, tasks, rows = today_tasks(p)
     check("互换后生效", active, True)
-    check("互换后任务", tasks, ["擦黑板", "扫地", "倒垃圾"])
-    check("互换后 origTask 不变", [r[1] for r in rows], ["扫地", "擦黑板", "倒垃圾"])
+    check("互换后任务", tasks, [base[1], base[0], base[2]])
+    check("互换后 origTask 不变", [r[1] for r in rows], base)
     check("互换后 swapped", [r[2] for r in rows], [True, True, False])
 
-    # 再互换一次应回到原样（基于原始任务对调，非基于当前值）
+    # 再互换一次应回到原样（toggle，非累加）
     m.Plugin.swap_member_tasks(p, 0, 1)
-    check("二次互换还原", today_tasks(p)[1], ["扫地", "擦黑板", "倒垃圾"])
+    check("二次互换还原", today_tasks(p)[1], base)
 
     # 与自身互换无效
     check("自互换无效", m.Plugin.swap_member_tasks(p, 1, 1), False)
 
 
 def test_set_and_reset() -> None:
-    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")]])
-    check("改任务成功", m.Plugin.set_member_task(p, 0, "拖地"), True)
-    check("改后任务", today_tasks(p)[1], ["拖地", "擦黑板"])
+    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")],
+                     [("赵六", "拖地"), ("孙七", "擦窗")]])
+    base = base_tasks(p)
+
+    check("改任务成功", m.Plugin.set_member_task(p, 0, "拖走廊"), True)
+    check("改后任务", today_tasks(p)[1], ["拖走廊", base[1]])
 
     # 空串 = 恢复，且全部恢复后记录清空
     check("空串恢复", m.Plugin.set_member_task(p, 0, ""), True)
-    check("恢复后任务", today_tasks(p)[1], ["扫地", "擦黑板"])
+    check("恢复后任务", today_tasks(p)[1], base)
     check("恢复后记录清空", p._task_swaps, {})
 
     check("reset 等价", m.Plugin.set_member_task(p, 1, "倒垃圾"), True)
     check("reset 成功", m.Plugin.reset_member_task(p, 1), True)
-    check("reset 后任务", today_tasks(p)[1], ["扫地", "擦黑板"])
+    check("reset 后任务", today_tasks(p)[1], base)
 
     # 空白字符串视为恢复
     m.Plugin.set_member_task(p, 0, "  ")
@@ -140,7 +155,8 @@ def test_set_and_reset() -> None:
 
 
 def test_bounds() -> None:
-    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")]])
+    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")],
+                     [("赵六", "拖地"), ("孙七", "擦窗")]])
     check("改任务下标越界", m.Plugin.set_member_task(p, 2, "拖地"), False)
     check("改任务负下标", m.Plugin.set_member_task(p, -1, "拖地"), False)
     check("互换下标越界", m.Plugin.swap_member_tasks(p, 0, 5), False)
@@ -169,14 +185,17 @@ def test_bounds() -> None:
 
 
 def test_expiry() -> None:
-    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")]])
+    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")],
+                     [("赵六", "拖地"), ("孙七", "擦窗")]])
+    base = base_tasks(p)
+
     m.Plugin.swap_member_tasks(p, 0, 1)
     check("建立后生效", today_tasks(p)[0], True)
 
     # 轮到下一档：slot 不一致 → 失效
     p._task_swaps["slot"] = p._task_swaps["slot"] + 1
     check("换档后失效", today_tasks(p)[0], False)
-    check("换档后任务还原", today_tasks(p)[1], ["扫地", "擦黑板"])
+    check("换档后任务还原", today_tasks(p)[1], base)
 
     # 换组：groupIndex 不一致 → 失效
     m.Plugin.swap_member_tasks(p, 0, 1)
@@ -186,30 +205,34 @@ def test_expiry() -> None:
     # 成员下标越界的记录被过滤
     m.Plugin.swap_member_tasks(p, 0, 1)
     p._task_swaps["tasks"][7] = "不存在的成员"
-    check("越界下标被过滤", today_tasks(p)[1], ["擦黑板", "扫地"])
+    check("越界下标被过滤", today_tasks(p)[1], [base[1], base[0]])
 
 
 def test_clear() -> None:
-    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")]])
+    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")],
+                     [("赵六", "拖地"), ("孙七", "擦窗")]])
+    base = base_tasks(p)
+
     m.Plugin.swap_member_tasks(p, 0, 1)
-    m.Plugin.set_member_task(p, 0, "拖地")
+    m.Plugin.set_member_task(p, 0, "拖走廊")
     check("清空前生效", today_tasks(p)[0], True)
     check("全部恢复", m.Plugin.clear_task_swaps(p), True)
     check("清空后失效", today_tasks(p)[0], False)
-    check("清空后任务", today_tasks(p)[1], ["扫地", "擦黑板"])
+    check("清空后任务", today_tasks(p)[1], base)
     check("空表再清也成功", m.Plugin.clear_task_swaps(p), True)
 
     # get_task_swaps 的返回结构
     info = m.Plugin.get_task_swaps(p)
     check("get 未生效 active", info["active"], False)
-    m.Plugin.set_member_task(p, 0, "拖地")
+    m.Plugin.set_member_task(p, 0, "拖走廊")
     info = m.Plugin.get_task_swaps(p)
     check("get 生效 active", info["active"], True)
-    check("get tasks", info["tasks"], {"0": "拖地"})
+    check("get tasks", info["tasks"], {"0": "拖走廊"})
 
 
 def test_persistence() -> None:
-    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")]])
+    p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")],
+                     [("赵六", "拖地"), ("孙七", "擦窗")]])
     m.Plugin.swap_member_tasks(p, 0, 1)
 
     payload = p._task_swaps_payload()
@@ -250,6 +273,19 @@ def test_parse_dirty() -> None:
           {"slot": 2, "groupIndex": 1, "tasks": {0: "扫地"}})
 
 
+def test_any_group() -> None:
+    """换起始日让今天命中不同组，行为应完全一致（防止测试写死第一组而隔天误报）。"""
+    for start in ("2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04"):
+        p = make_plugin([[("张三", "扫地"), ("李四", "擦黑板")],
+                         [("赵六", "拖地"), ("孙七", "擦窗")]], start=start)
+        base = base_tasks(p)
+        check(f"起点{start} 有成员", len(base) > 0, True)
+        check(f"起点{start} 互换", m.Plugin.swap_member_tasks(p, 0, 1), True)
+        check(f"起点{start} 互换结果", today_tasks(p)[1], [base[1], base[0]])
+        m.Plugin.clear_task_swaps(p)
+        check(f"起点{start} 清空后", today_tasks(p)[1], base)
+
+
 def main() -> int:
     test_basic()
     test_set_and_reset()
@@ -258,6 +294,7 @@ def main() -> int:
     test_clear()
     test_persistence()
     test_parse_dirty()
+    test_any_group()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
