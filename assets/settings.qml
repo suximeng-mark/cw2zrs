@@ -89,6 +89,7 @@ PluginPage {
         { title: qsTr("界面设置"), icon: "ic_fluent_text_font_size_20_regular" },
         { title: qsTr("人员设置"), icon: "ic_fluent_people_20_regular" },
         { title: qsTr("轮换管理"), icon: "ic_fluent_arrow_sync_20_regular" },
+        { title: qsTr("临时调整"), icon: "ic_fluent_people_swap_20_regular" },
         { title: qsTr("请假管理"), icon: "ic_fluent_person_prohibited_20_regular" },
         { title: qsTr("实验性功能"), icon: "ic_fluent_alert_20_regular" },
         { title: qsTr("备份 / 迁移"), icon: "ic_fluent_arrow_import_20_regular" }
@@ -239,6 +240,95 @@ PluginPage {
 
     // 分组数据整体替换后（加载 / 导入 / 删组），保证当前组索引仍在范围内
     onGroupsDataChanged: root.clampGroupIndex()
+
+    // ===== 临时任务调整（当轮有效：轮换到下一组 / 下一轮自动失效）=====
+    function taskRows() {
+        root.editRev
+        var out = []
+        var d = root.todayData
+        if (!d || !d.members) return out
+        for (var i = 0; i < d.members.length; i++) {
+            var m = d.members[i]
+            out.push({
+                index: i,
+                name: m.name || "",
+                origTask: m.origTask || "",
+                task: m.task || "",
+                changed: !!m.swapped
+            })
+        }
+        return out
+    }
+
+    function taskMemberNames() {
+        root.editRev
+        var out = []
+        var rows = root.taskRows()
+        for (var i = 0; i < rows.length; i++) {
+            var who = rows[i].name || qsTr("成员%1").arg(rows[i].index + 1)
+            out.push(who + (rows[i].task ? "（" + rows[i].task + "）" : ""))
+        }
+        return out
+    }
+
+    function taskSwapDesc() {
+        var d = root.todayData
+        if (!d || !d.members || !d.members.length)
+            return qsTr("当前没有值日成员")
+        return d.date + " · " + d.groupName + " · " + qsTr("第 %1 次").arg(d.periodNumber)
+               + (d.taskSwapActive ? " · " + qsTr("本轮已调整") : "")
+    }
+
+    function reportTaskSwap(msg, ok) {
+        taskSwapResultText.text = msg
+        taskSwapResultText.color = ok ? "#2E7D32" : "#E5594F"
+    }
+
+    function reloadTaskSwaps() {
+        root.refreshTodayStats()
+        root.bumpEdit()
+    }
+
+    function doSwapTasks(a, b) {
+        if (!root.backend || a === b) return
+        var ok = false
+        try {
+            ok = root.backend.swap_member_tasks(a, b)
+        } catch (e) {
+            console.error("[值日生] 临时任务对调失败: " + e)
+        }
+        root.reportTaskSwap(ok ? qsTr("已对调任务 ") + root.saveStamp() : qsTr("对调失败"), ok)
+        if (ok) root.reloadTaskSwaps()
+    }
+
+    function setTaskNow(i, text) {
+        if (!root.backend) return
+        var ok = false
+        try {
+            ok = root.backend.set_member_task(i, text)
+        } catch (e) {
+            console.error("[值日生] 临时改任务失败: " + e)
+        }
+        var msg = text.trim()
+                  ? qsTr("本轮任务已更新 ") + root.saveStamp()
+                  : qsTr("已恢复原任务 ") + root.saveStamp()
+        root.reportTaskSwap(ok ? msg : qsTr("保存失败"), ok)
+        if (ok) root.reloadTaskSwaps()
+    }
+
+    function resetTaskAt(i) {
+        if (!root.backend) return
+        var ok = root.backend.reset_member_task(i)
+        root.reportTaskSwap(ok ? qsTr("已恢复原任务 ") + root.saveStamp() : qsTr("恢复失败"), ok)
+        if (ok) root.reloadTaskSwaps()
+    }
+
+    function clearAllTaskSwaps() {
+        if (!root.backend) return
+        var ok = root.backend.clear_task_swaps()
+        root.reportTaskSwap(ok ? qsTr("已全部恢复 ") + root.saveStamp() : qsTr("恢复失败"), ok)
+        if (ok) root.reloadTaskSwaps()
+    }
 
     // ===== 分组/成员编辑 =====
     // 组索引越界时收回（删组 / 导入配置后自动生效）
@@ -2055,10 +2145,147 @@ PluginPage {
             }
 
             // =====================================================
-            // 页面 3：请假管理（今日请假 + 手动换组 + 统计）
+            // 页面 3：临时调整（本轮成员任务互换 / 临时改任务）
             // =====================================================
             ColumnLayout {
                 visible: root.currentPage === 3
+                spacing: 12
+                Layout.fillWidth: true
+
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_people_swap_20_regular"
+                    title: qsTr("本轮成员任务")
+                    description: root.taskSwapDesc()
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        // 两人互换：各自选一名成员，点击即对调任务
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            visible: root.taskRows().length > 1
+
+                            Label { text: qsTr("互换"); opacity: 0.7; font.pixelSize: 12 }
+                            ComboBox {
+                                id: swapACombo
+                                Layout.preferredWidth: 150
+                                model: root.taskMemberNames()
+                            }
+                            Label { text: qsTr("与"); opacity: 0.7; font.pixelSize: 12 }
+                            ComboBox {
+                                id: swapBCombo
+                                Layout.preferredWidth: 150
+                                model: root.taskMemberNames()
+                                // 默认选中第 2 人，避免两个下拉同项导致「对调」按钮禁用
+                                // （成员不足 2 人时整行隐藏，ComboBox 会自动收回为 0）
+                                currentIndex: 1
+                            }
+                            Button {
+                                text: qsTr("对调任务")
+                                highlighted: true
+                                enabled: swapACombo.currentIndex !== swapBCombo.currentIndex
+                                onClicked: root.doSwapTasks(swapACombo.currentIndex,
+                                                            swapBCombo.currentIndex)
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        ResultText { id: taskSwapResultText }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            visible: root.taskRows().length > 0
+
+                            Text { text: qsTr("#"); Layout.preferredWidth: 24; opacity: 0.5; font.pixelSize: 12 }
+                            Text { text: qsTr("姓名"); Layout.preferredWidth: 84; opacity: 0.5; font.pixelSize: 12 }
+                            Text { text: qsTr("原任务"); Layout.fillWidth: true; opacity: 0.5; font.pixelSize: 12 }
+                            Text { text: qsTr("本轮任务"); Layout.fillWidth: true; opacity: 0.5; font.pixelSize: 12 }
+                            Item { Layout.preferredWidth: 64 }
+                        }
+
+                        Repeater {
+                            model: root.taskRows()
+
+                            delegate: RowLayout {
+                                id: taskRow
+                                required property var modelData
+
+                                Layout.fillWidth: true
+                                spacing: 8
+
+                                Text {
+                                    text: taskRow.modelData.index + 1
+                                    Layout.preferredWidth: 24
+                                    opacity: 0.5
+                                    font.pixelSize: 12
+                                    horizontalAlignment: Text.AlignHCenter
+                                }
+                                Text {
+                                    text: taskRow.modelData.name || qsTr("（未命名）")
+                                    Layout.preferredWidth: 84
+                                    font.pixelSize: 12
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    text: taskRow.modelData.origTask || "—"
+                                    Layout.fillWidth: true
+                                    opacity: 0.55
+                                    font.pixelSize: 12
+                                    elide: Text.ElideRight
+                                }
+                                TextField {
+                                    Layout.fillWidth: true
+                                    placeholderText: qsTr("任务")
+                                    text: taskRow.modelData.task
+                                    // 只在回车 / 失焦时写后端：边打字边保存会刷新
+                                    // todayData 并重建 delegate，输入框会失焦、光标跳位
+                                    onEditingFinished: root.setTaskNow(taskRow.modelData.index, text)
+                                }
+                                Button {
+                                    Layout.preferredWidth: 64
+                                    text: qsTr("恢复")
+                                    enabled: taskRow.modelData.changed
+                                    onClicked: root.resetTaskAt(taskRow.modelData.index)
+                                }
+                            }
+                        }
+
+                        Text {
+                            visible: root.taskRows().length === 0
+                            text: qsTr("当前没有值日成员，请先在「人员设置」中配置分组与成员")
+                            opacity: 0.55
+                            font.pixelSize: 12
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Button {
+                                text: qsTr("全部恢复")
+                                enabled: !!(root.todayData && root.todayData.taskSwapActive)
+                                onClicked: root.clearAllTaskSwaps()
+                            }
+                            Label {
+                                text: qsTr("只在当前这一轮生效，轮换到下一组 / 下一轮自动恢复")
+                                opacity: 0.55
+                                font.pixelSize: 12
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                    }
+                }
+            }
+
+            // =====================================================
+            // 页面 4：请假管理（今日请假 + 手动换组 + 统计）
+            // =====================================================
+            ColumnLayout {
+                visible: root.currentPage === 4
                 spacing: 12
                 Layout.fillWidth: true
 
@@ -2270,10 +2497,10 @@ PluginPage {
             }
 
             // =====================================================
-            // 页面 4：实验性功能
+            // 页面 5：实验性功能
             // =====================================================
             ColumnLayout {
-                visible: root.currentPage === 4
+                visible: root.currentPage === 5
                 spacing: 12
                 Layout.fillWidth: true
 
@@ -2346,10 +2573,10 @@ PluginPage {
             }
 
             // =====================================================
-            // 页面 5：备份 / 迁移
+            // 页面 6：备份 / 迁移
             // =====================================================
             ColumnLayout {
-                visible: root.currentPage === 5
+                visible: root.currentPage === 6
                 spacing: 12
                 Layout.fillWidth: true
 

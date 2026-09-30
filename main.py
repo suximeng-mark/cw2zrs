@@ -187,6 +187,10 @@ class Plugin(CW2Plugin):
         self._manual_offset: int = 0
         # 临时调班：{date_iso: group_index}，仅覆盖当日自动轮换结果
         self._temp_swaps: Dict[str, int] = {}
+        # 临时任务调整（当轮有效）：{slot, groupIndex, tasks:{成员下标: 任务}}
+        # slot 为建立时的轮换档数、groupIndex 为建立时的实际组下标；
+        # 两者任一变化（轮到下一组/下一轮、手动切组、临时调班）即自动失效
+        self._task_swaps: Dict[str, Any] = {}
         self._settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
         plugin_dir = Path(__file__).resolve().parent
         self._data_dir = plugin_dir / "data"
@@ -439,8 +443,63 @@ class Plugin(CW2Plugin):
                     except (ValueError, TypeError):
                         continue
         self._temp_swaps = swaps
+        self._task_swaps = self._parse_task_swaps(data.get("task_swaps"))
         self._slots_cache.clear()
         self._invalidate_holiday_cache()
+
+    @staticmethod
+    def _parse_task_swaps(raw: Any) -> Dict[str, Any]:
+        """归一化临时任务调整数据；结构不合法或为空返回 {}。
+
+        只做形状校验，不判断是否仍在本轮（生效判定交给 _task_swap_map）。
+        """
+        if not isinstance(raw, dict):
+            return {}
+        try:
+            slot = int(raw.get("slot"))
+            group_index = int(raw.get("groupIndex"))
+        except (ValueError, TypeError):
+            return {}
+        if slot < 0 or group_index < 0:
+            return {}
+        raw_tasks = raw.get("tasks")
+        if not isinstance(raw_tasks, dict):
+            return {}
+        tasks: Dict[int, str] = {}
+        for k, v in raw_tasks.items():
+            try:
+                idx = int(k)
+            except (ValueError, TypeError):
+                continue
+            if idx < 0:
+                continue
+            tasks[idx] = str(v or "")
+        if not tasks:
+            return {}
+        return {"slot": slot, "groupIndex": group_index, "tasks": tasks}
+
+    def _task_swap_map(self, slots: int, group_index: int) -> Dict[int, str]:
+        """本轮生效的临时任务表：{成员下标: 临时任务}；未生效返回空表。
+
+        生效条件：记录的档数与组下标都与当前一致，且成员下标未越界。
+        """
+        s = self._task_swaps
+        if not s:
+            return {}
+        if s.get("slot") != slots or s.get("groupIndex") != group_index:
+            return {}
+        if not (0 <= group_index < len(self._groups)):
+            return {}
+        total = len(self._groups[group_index].members)
+        return {i: t for i, t in s.get("tasks", {}).items() if 0 <= i < total}
+
+    def _task_swap_context(self) -> Optional[tuple]:
+        """今日上下文：(slots, group_index, group)；无分组/无今日结果返回 None。"""
+        found = self._actual_group_for_day(date.today())
+        if found is None:
+            return None
+        slots, idx, group = found[0], found[1], found[2]
+        return slots, idx, group
 
     def _load_config_file(self) -> Optional[Dict[str, Any]]:
         try:
@@ -473,7 +532,19 @@ class Plugin(CW2Plugin):
             "merge_pairs": [{"a": a, "b": b} for a, b in self._merge_pairs],
             "manual_offset": self._manual_offset,
             "temp_swaps": dict(self._temp_swaps),
+            "task_swaps": self._task_swaps_payload(),
             "settings": dict(self._settings),
+        }
+
+    def _task_swaps_payload(self) -> Dict[str, Any]:
+        """可序列化的临时任务调整（下标转字符串，便于 JSON）。"""
+        s = self._task_swaps
+        if not s:
+            return {}
+        return {
+            "slot": s.get("slot", 0),
+            "groupIndex": s.get("groupIndex", 0),
+            "tasks": {str(i): t for i, t in s.get("tasks", {}).items()},
         }
 
     def _flush_config(self) -> None:
@@ -668,13 +739,21 @@ class Plugin(CW2Plugin):
             return json.loads(data)
         return json.loads(json.dumps(data, default=_object_to_builtin))
 
-    @staticmethod
-    def _member_line(group: DutyGroup, empty_text: str = "（无值日成员）") -> str:
-        """把组成员拼成“姓名（任务）、姓名（任务）”一行。"""
+    def _member_line(
+        self,
+        group: DutyGroup,
+        empty_text: str = "（无值日成员）",
+        over: Optional[Dict[int, str]] = None,
+    ) -> str:
+        """把组成员拼成“姓名（任务）、姓名（任务）”一行。
+
+        over 为临时任务调整表 {成员下标: 任务}，传入时按调整后的任务展示。
+        """
         labels: List[str] = []
-        for m in group.members:
+        for i, m in enumerate(group.members):
             nm = m.name or "（未命名）"
-            labels.append(f"{nm}（{m.task}）" if m.task else nm)
+            task = (over or {}).get(i, m.task)
+            labels.append(f"{nm}（{task}）" if task else nm)
         return "、".join(labels) if labels else empty_text
 
     def _holidays_fingerprint(self) -> tuple:
@@ -1113,6 +1192,8 @@ class Plugin(CW2Plugin):
             # slotPosition 为本次值日中的第几个单位（1..slotDays）
             "slotDays": self._slot_days,
             "slotPosition": self._slot_progress(today)[0],
+            # 临时任务调整（当轮有效）
+            "taskSwapActive": False,
         }
         result.update(self._display_payload())
 
@@ -1125,14 +1206,19 @@ class Plugin(CW2Plugin):
                 if record["group_name"] == group.name
                 else []
             )
+            # 临时任务调整：只影响展示与提醒，历史记录仍按配置原样留存
+            over = self._task_swap_map(slots, idx)
             result.update({
                 "currentIndex": idx,
                 "groupName": group.name,
                 "switched": idx != auto_idx,
+                "taskSwapActive": bool(over),
                 "members": [
                     {
                         "name": m.name,
-                        "task": m.task,
+                        "task": over.get(i, m.task),
+                        "origTask": m.task,
+                        "swapped": i in over,
                         "status": statuses[i] if i < len(statuses) else STATUS_NORMAL,
                     }
                     for i, m in enumerate(group.members)
@@ -1440,11 +1526,12 @@ class Plugin(CW2Plugin):
 
     def _duty_brief(self, day: date) -> Optional[tuple]:
         """某日提醒文案：(组名, 成员一行文本)；无分组返回 None。"""
-        found = self._group_for_day(day)
+        found = self._actual_group_for_day(day)
         if found is None:
             return None
-        _, _, group = found
-        return group.name, self._member_line(group)
+        slots, idx, group = found[0], found[1], found[2]
+        over = self._task_swap_map(slots, idx)
+        return group.name, self._member_line(group, over=over)
 
     def _fire_reminder(self, day: date) -> bool:
         if self._notifier is None:
@@ -1620,6 +1707,7 @@ class Plugin(CW2Plugin):
             self._holidays = holidays
             self._manual_offset = 0
             self._temp_swaps = {}
+            self._task_swaps = {}
             self._slots_cache.clear()
             self._invalidate_holiday_cache()
 
@@ -1659,6 +1747,7 @@ class Plugin(CW2Plugin):
                     "merge_pairs": [{"a": a, "b": b} for a, b in self._merge_pairs],
                     "holidays": self._build_config_payload()["holidays"],
                     "temp_swaps": dict(self._temp_swaps),
+                    "task_swaps": self._task_swaps_payload(),
                 }
             if include_history:
                 sections["history"] = self._history
@@ -1744,6 +1833,7 @@ class Plugin(CW2Plugin):
                             except (ValueError, TypeError):
                                 continue
                 self._temp_swaps = swaps
+                self._task_swaps = self._parse_task_swaps(rot.get("task_swaps"))
                 applied.append("轮换配置及方式")
 
             if include_history and isinstance(sections.get("history"), list):
@@ -2037,6 +2127,118 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
             self._temp_swaps[iso] = group_index
         logger.info(f"[值日生] 临时调班：{iso} -> 组{group_index if group_index >= 0 else '(清除)'}")
         self._persist()
+        return True
+
+    # ------------------------------------------- 临时任务调整（当轮有效）
+    @Slot(result="QVariant")
+    def get_task_swaps(self) -> Dict[str, Any]:
+        """当前生效的临时任务调整：{active, slot, groupIndex, tasks:{下标: 任务}}。
+
+        active=False 表示本轮无调整，或记录已随轮换失效（UI 据此提示）。
+        """
+        ctx = self._task_swap_context()
+        if ctx is None:
+            return {"active": False, "slot": 0, "groupIndex": -1, "tasks": {}}
+        slots, idx, _ = ctx
+        tasks = self._task_swap_map(slots, idx)
+        return {
+            "active": bool(tasks),
+            "slot": slots,
+            "groupIndex": idx,
+            "tasks": {str(i): t for i, t in tasks.items()},
+        }
+
+    @Slot(int, int, result=bool)
+    def swap_member_tasks(self, member_a: int, member_b: int) -> bool:
+        """互换今日值日组两名成员的任务（当轮有效）。
+
+        基于成员的**原始**任务对调；若两人已处于对调状态，再点一次即还原。
+        """
+        ctx = self._task_swap_context()
+        if ctx is None:
+            return False
+        slots, idx, group = ctx
+        members = group.members
+        if not (0 <= member_a < len(members)) or not (0 <= member_b < len(members)):
+            logger.error(f"[值日生] 临时互换成员下标无效：{member_a} / {member_b}")
+            return False
+        if member_a == member_b:
+            return False
+
+        over = self._task_swap_map(slots, idx)
+        # 已处于对调状态 → 再点一次还原（toggle）
+        already = (
+            over.get(member_a, members[member_a].task) == members[member_b].task
+            and over.get(member_b, members[member_b].task) == members[member_a].task
+        )
+
+        if self._task_swaps.get("slot") != slots or self._task_swaps.get("groupIndex") != idx:
+            self._task_swaps = {"slot": slots, "groupIndex": idx, "tasks": {}}
+        tasks = self._task_swaps.setdefault("tasks", {})
+
+        if already:
+            tasks.pop(member_a, None)
+            tasks.pop(member_b, None)
+            logger.info(
+                f"[值日生] 临时任务已还原（第{slots}档 组{idx}）："
+                f"{members[member_a].name} <-> {members[member_b].name}"
+            )
+        else:
+            tasks[member_a] = members[member_b].task
+            tasks[member_b] = members[member_a].task
+            logger.info(
+                f"[值日生] 临时任务互换（第{slots}档 组{idx}）："
+                f"{members[member_a].name} <-> {members[member_b].name}"
+            )
+        if not tasks:
+            self._task_swaps = {}
+        self._persist()
+        self._emit_duty_changed()
+        return True
+
+    @Slot(int, str, result=bool)
+    def set_member_task(self, member_index: int, task: str) -> bool:
+        """临时把某成员的任务改成 task（当轮有效）；task 为空串表示恢复原任务。"""
+        ctx = self._task_swap_context()
+        if ctx is None:
+            return False
+        slots, idx, group = ctx
+        if not (0 <= member_index < len(group.members)):
+            logger.error(f"[值日生] 临时改任务成员下标无效：{member_index}")
+            return False
+
+        if self._task_swaps.get("slot") != slots or self._task_swaps.get("groupIndex") != idx:
+            self._task_swaps = {"slot": slots, "groupIndex": idx, "tasks": {}}
+        tasks = self._task_swaps.setdefault("tasks", {})
+        value = str(task or "").strip()
+        if value:
+            tasks[member_index] = value
+            logger.info(f"[值日生] 临时任务：{group.members[member_index].name} -> {value}")
+        else:
+            if tasks.pop(member_index, None) is None:
+                self._task_swaps = {}
+                return True
+            logger.info(f"[值日生] 临时任务已恢复：{group.members[member_index].name}")
+        if not tasks:
+            self._task_swaps = {}
+        self._persist()
+        self._emit_duty_changed()
+        return True
+
+    @Slot(int, result=bool)
+    def reset_member_task(self, member_index: int) -> bool:
+        """取消某成员的临时任务调整，恢复其原始任务。"""
+        return self.set_member_task(member_index, "")
+
+    @Slot(result=bool)
+    def clear_task_swaps(self) -> bool:
+        """清空本轮全部临时任务调整。"""
+        if not self._task_swaps:
+            return True
+        self._task_swaps = {}
+        logger.info("[值日生] 临时任务调整已全部清除")
+        self._persist()
+        self._emit_duty_changed()
         return True
 
     @Slot(int, str, result="QVariant")
