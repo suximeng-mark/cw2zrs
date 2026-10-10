@@ -20,7 +20,41 @@ PluginPage {
     property var mergePairs: []       // 临时合并：[{a, b}]，成对的任意两天合计 1 档
     property var holidaysData: []
     property var todayData: null
-    property var statsData: {"days": 0, "rows": [], "recent": []}
+    property var statsData: {"days": 0, "rows": [], "recent": [], "byWeek": [], "byGroup": []}
+
+    // 统计图表的派生数据：柱高 / 条长比例在这里算好再交给 delegate。
+    // 两个原因：一是比例尺只算一次而不是每根柱子各算一遍；
+    // 二是 delegate 内每引用一次外层 id（如 root.xxx）qmllint 就多一条
+    // Unqualified access，模型里带上像素值就能把告警压回基线。
+    property var statsWeekBars: {
+        var src = root.statsData.byWeek || []
+        var m = 1
+        for (var i = 0; i < src.length; i++)
+            if (src[i].count > m) m = src[i].count
+        var out = []
+        for (var j = 0; j < src.length; j++)
+            out.push({
+                label: src[j].label,
+                absent: src[j].absent,
+                barHeight: Math.max(4, 76 * src[j].count / m)
+            })
+        return out
+    }
+    property var statsGroupBars: {
+        var src = root.statsData.byGroup || []
+        var m = 1
+        for (var i = 0; i < src.length; i++)
+            if (src[i].count > m) m = src[i].count
+        var out = []
+        for (var j = 0; j < src.length; j++)
+            out.push({
+                name: src[j].name,
+                count: src[j].count,
+                absent: src[j].absent,
+                ratio: src[j].count / m
+            })
+        return out
+    }
     property var weekSchedule: {"monday": "", "sunday": "", "days": [], "groupNames": []}
     property var monthInfo: {"year": 0, "month": 0, "days": []}
 
@@ -2414,6 +2448,138 @@ PluginPage {
                                     Layout.preferredWidth: 80
                                     font.pixelSize: 13
                                     color: modelData.absent > 0 ? "#E5594F" : (Theme.isDark() ? "#FFFFFF" : "#1B1B1F")
+                                }
+                            }
+                        }
+
+                        // ---------- 图表：最近 12 周值日天数 ----------
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 12
+                            Layout.preferredHeight: 124
+                            spacing: 4
+                            visible: root.statsWeekBars.length > 0
+
+                            Text {
+                                text: qsTr("最近 12 周值日天数（下方橙色数字为该周请假人次）")
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                spacing: 4
+
+                                Repeater {
+                                    model: root.statsWeekBars
+
+                                    delegate: ColumnLayout {
+                                        required property var modelData
+                                            id: weekCol
+
+                                        Layout.fillWidth: true
+                                        spacing: 3
+
+                                        //柱子锚在底部对齐，高度按比例尺换算
+                                        Item {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+
+                                            Rectangle {
+                                                anchors.bottom: parent.bottom
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                width: 22
+                                                height: weekCol.modelData.barHeight
+                                                radius: 4
+                                                color: Colors.proxy.primaryColor
+                                            }
+                                        }
+
+                                        Text {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: weekCol.modelData.label
+                                            font.pixelSize: 10
+                                            opacity: 0.6
+                                        }
+
+                                        Text {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: weekCol.modelData.absent > 0 ? weekCol.modelData.absent + "假" : ""
+                                            font.pixelSize: 9
+                                            color: "#E5A100"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ---------- 图表：各组值日天数 ----------
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 12
+                            spacing: 6
+                            visible: root.statsGroupBars.length > 0
+
+                            Text {
+                                text: qsTr("各组值日天数")
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+
+                            Repeater {
+                                model: root.statsGroupBars
+
+                                delegate: RowLayout {
+                                    required property var modelData
+                                        id: groupRow
+
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Text {
+                                        text: groupRow.modelData.name
+                                        Layout.preferredWidth: 96
+                                        font.pixelSize: 12
+                                        elide: Text.ElideRight
+                                    }
+
+                                    // 进度条：底层轨道 + 按比例的前段
+                                    Item {
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 14
+
+                                        Rectangle {
+                                            anchors.fill: parent
+                                            radius: 7
+                                            color: Theme.isDark()
+                                                   ? Qt.alpha("#FFFFFF", 0.08)
+                                                   : Qt.alpha("#000000", 0.06)
+                                        }
+
+                                        Rectangle {
+                                            anchors.left: parent.left
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            height: parent.height
+                                            width: Math.max(6, parent.width * groupRow.modelData.ratio)
+                                            radius: 7
+                                            color: Colors.proxy.primaryColor
+                                        }
+                                    }
+
+                                    Text {
+                                        text: groupRow.modelData.count
+                                        Layout.preferredWidth: 34
+                                        horizontalAlignment: Text.AlignRight
+                                        font.pixelSize: 12
+                                    }
+
+                                    Text {
+                                        text: groupRow.modelData.absent > 0 ? groupRow.modelData.absent + " 假" : ""
+                                        Layout.preferredWidth: 40
+                                        font.pixelSize: 11
+                                        color: "#E5594F"
+                                    }
                                 }
                             }
                         }

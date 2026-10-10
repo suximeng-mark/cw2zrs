@@ -1647,7 +1647,48 @@ class Plugin(CW2Plugin):
             "days": len(records),
             "rows": rows,
             "recent": recent[-15:][::-1],
+            "byWeek": self._stats_by_week(records),
+            "byGroup": self._stats_by_group(records),
         }
+
+    # 周数上限：图表只看最近这么多周，历史再长也不会把界面撑爆
+    STATS_WEEKS_LIMIT = 12
+
+    @staticmethod
+    def _record_absent(record: Dict[str, Any]) -> int:
+        """该日记录的请假人次（无姓名成员的记录不计）。"""
+        return sum(
+            1 for m in record.get("members", [])
+            if m.get("name") and m.get("status") == STATUS_ABSENT
+        )
+
+    def _stats_by_week(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按自然周（周一起）聚合：最近 STATS_WEEKS_LIMIT 周的值日天数与请假人次。"""
+        buckets: Dict[str, Dict[str, Any]] = {}
+        for r in records:
+            try:
+                day = date.fromisoformat(r["date"])
+            except (ValueError, TypeError):
+                continue  # 脏日期不参与图表
+            monday = day - timedelta(days=day.weekday())
+            slot = buckets.setdefault(monday.isoformat(), {
+                "label": f"{monday.month}/{monday.day}",
+                "count": 0,
+                "absent": 0,
+            })
+            slot["count"] += 1
+            slot["absent"] += self._record_absent(r)
+        return [buckets[k] for k in sorted(buckets)[-self.STATS_WEEKS_LIMIT:]]
+
+    def _stats_by_group(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按值日组聚合：各组值日天数与请假人次，按次数降序。"""
+        buckets: Dict[str, Dict[str, Any]] = {}
+        for r in records:
+            name = r.get("group_name") or "（未命名组）"
+            slot = buckets.setdefault(name, {"name": name, "count": 0, "absent": 0})
+            slot["count"] += 1
+            slot["absent"] += self._record_absent(r)
+        return sorted(buckets.values(), key=lambda e: (-e["count"], e["name"]))
 
     @Slot()
     def clear_history(self) -> None:
