@@ -2079,6 +2079,195 @@ class Plugin(CW2Plugin):
                     ]
                 )
 
+    @staticmethod
+    def _xml_escape(value: Any) -> str:
+        """XML 文本转义（手写 OOXML 用）。"""
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    # xlsx 就是「zip + 一组 OOXML」，用标准库 zipfile 手写即可，
+    # 不给插件引入 openpyxl —— CW2 运行时未必装了第三方包，
+    # 缺依赖会直接让插件加载失败。样式索引与 _xlsx_styles() 一一对应。
+    XLSX_HEADER = 1      # 表头：加粗白字 + 深色底 + 边框 + 居中
+    XLSX_TEXT = 2        # 正文：左对齐 + 边框
+    XLSX_CENTER = 3      # 正文：居中 + 边框
+    XLSX_HOLIDAY = 4     # 假期行：琥珀底
+    XLSX_WEEKEND = 5     # 周末行：浅灰底
+    XLSX_HEADERS = ("日期", "星期", "值日组", "成员（任务）", "备注", "轮次")
+    XLSX_WIDTHS = (12, 7, 14, 42, 26, 12)
+
+    @classmethod
+    def _xlsx_styles(cls) -> str:
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fonts count="2">'
+            '<font><sz val="11"/><name val="等线"/></font>'
+            '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="等线"/></font>'
+            '</fonts>'
+            '<fills count="4">'
+            '<fill><patternFill patternType="none"/></fill>'
+            '<fill><patternFill patternType="gray125"/></fill>'
+            '<fill><patternFill patternType="solid">'
+            '<fgColor rgb="FF4C5B78"/><bgColor indexed="64"/></patternFill></fill>'
+            '<fill><patternFill patternType="solid">'
+            '<fgColor rgb="FFFFF3D6"/><bgColor indexed="64"/></patternFill></fill>'
+            '</fills>'
+            '<borders count="2">'
+            '<border><left/><right/><top/><bottom/><diagonal/></border>'
+            '<border>'
+            '<left style="thin"><color rgb="FFC9CBD6"/></left>'
+            '<right style="thin"><color rgb="FFC9CBD6"/></right>'
+            '<top style="thin"><color rgb="FFC9CBD6"/></top>'
+            '<bottom style="thin"><color rgb="FFC9CBD6"/></bottom>'
+            '<diagonal/></border>'
+            '</borders>'
+            '<cellStyleXfs count="1">'
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>'
+            '</cellStyleXfs>'
+            '<cellXfs count="6">'
+            # 0 默认
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+            # 1 表头
+            '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1"'
+            ' applyFill="1" applyBorder="1" applyAlignment="1">'
+            '<alignment horizontal="center" vertical="center"/></xf>'
+            # 2 正文左对齐
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"'
+            ' applyAlignment="1"><alignment vertical="center"/></xf>'
+            # 3 正文居中
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"'
+            ' applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+            # 4 假期行
+            '<xf numFmtId="0" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1"'
+            ' applyBorder="1" applyAlignment="1"><alignment vertical="center"/></xf>'
+            # 5 周末行
+            '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"'
+            ' applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>'
+            '</cellXfs>'
+            '<cellStyles count="1">'
+            '<cellStyle name="常规" xfId="0" builtinId="0"/>'
+            '</cellStyles>'
+            '</styleSheet>'
+        )
+
+    @staticmethod
+    def _schedule_row_style(note: str) -> int:
+        """按备注给整行选样式（假期琥珀 / 周末居中灰 / 普通左对齐）。"""
+        if note.startswith("假期"):
+            return Plugin.XLSX_HOLIDAY
+        if note == "周末":
+            return Plugin.XLSX_WEEKEND
+        return Plugin.XLSX_TEXT
+
+    def _write_schedule_xlsx(
+        self,
+        path: Path,
+        rows: List[Dict[str, str]],
+        start_day: date,
+        end_day: date,
+        weeks: int,
+    ) -> None:
+        """写出 .xlsx 值日表：加粗表头、冻结首行、自动筛选、列宽、假期/周末底色。"""
+        import zipfile
+
+        def cell(col: int, row: int, text: str, style: int) -> str:
+            # inlineStr：不引 sharedStrings，少一份部件、少一层索引
+            ref = f"{chr(ord('A') + col)}{row}"
+            return (
+                f'<c r="{ref}" s="{style}" t="inlineStr">'
+                f'<is><t xml:space="preserve">{self._xml_escape(text)}</t></is></c>'
+            )
+
+        header_cells = "".join(
+            cell(i, 1, name, self.XLSX_HEADER)
+            for i, name in enumerate(self.XLSX_HEADERS)
+        )
+        body: List[str] = []
+        for k, r in enumerate(rows):
+            row_no = k + 2
+            base = self._schedule_row_style(r["note"])
+            # 星期与轮次居中，其余左对齐（假期行整行统一用琥珀底）
+            values = [r["date"], r["weekday"], r["group"], r["members"],
+                      r["note"], r.get("period", "")]
+            cells = "".join(
+                cell(i, row_no, v, self.XLSX_CENTER if (base != self.XLSX_HOLIDAY and i in (1, 5)) else base)
+                for i, v in enumerate(values)
+            )
+            body.append(f'<row r="{row_no}">{cells}</row>')
+
+        last = len(rows) + 1
+        cols = "".join(
+            f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"/>'
+            for i, w in enumerate(self.XLSX_WIDTHS)
+        )
+        sheet = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetPr><outlinePr/></sheetPr>'
+            f'<dimension ref="A1:F{last}"/>'
+            # 冻结首行：向下滚动时表头始终可见
+            '<sheetViews><sheetView workbookViewId="0" tabSelected="1">'
+            '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+            '</sheetView></sheetViews>'
+            '<sheetFormatPr defaultRowHeight="18"/>'
+            f'<cols>{cols}</cols>'
+            '<sheetData>'
+            f'<row r="1" ht="22" customHeight="1">{header_cells}</row>'
+            f'{"".join(body)}'
+            '</sheetData>'
+            f'<autoFilter ref="A1:F{last}"/>'
+            '</worksheet>'
+        )
+        # 工作表名带上起止周次，方便直接交作业时一眼认出是哪份表
+        title = self._xml_escape(f"值日表 {start_day.isoformat()}起{weeks}周")
+        workbook = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+            ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<sheets><sheet name="{title}" sheetId="1" r:id="rId1"/></sheets>'
+            '</workbook>'
+        )
+        parts = {
+            "[Content_Types].xml":
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                '</Types>',
+            "_rels/.rels":
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1"'
+                ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"'
+                ' Target="xl/workbook.xml"/>'
+                '</Relationships>',
+            "xl/workbook.xml": workbook,
+            "xl/_rels/workbook.xml.rels":
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1"'
+                ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"'
+                ' Target="worksheets/sheet1.xml"/>'
+                '<Relationship Id="rId2"'
+                ' Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"'
+                ' Target="styles.xml"/>'
+                '</Relationships>',
+            "xl/styles.xml": self._xlsx_styles(),
+            "xl/worksheets/sheet1.xml": sheet,
+        }
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, content in parts.items():
+                zf.writestr(name, content.encode("utf-8"))
+
     def _write_schedule_html(
         self,
         path: Path,
@@ -2427,13 +2616,17 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
             out_dir_path.mkdir(parents=True, exist_ok=True)
             csv_path = out_dir_path / f"{base}.csv"
             html_path = out_dir_path / f"{base}.html"
+            xlsx_path = out_dir_path / f"{base}.xlsx"
             self._write_schedule_csv(csv_path, rows)
             self._write_schedule_html(html_path, rows, start_day, end_day, weeks)
+            self._write_schedule_xlsx(xlsx_path, rows, start_day, end_day, weeks)
 
-            logger.info(f"[值日生] 值日表已导出：{csv_path.name}, {html_path.name}")
+            logger.info(
+                f"[值日生] 值日表已导出：{csv_path.name}, {html_path.name}, {xlsx_path.name}"
+            )
             return {
                 "ok": True,
-                "msg": f"已导出到：{out_dir_path}\n{csv_path.name}\n{html_path.name}",
+                "msg": f"已导出到：{out_dir_path}\n{csv_path.name}\n{html_path.name}\n{xlsx_path.name}",
             }
         except Exception as e:
             logger.error(f"[值日生] 值日表导出失败: {e}")

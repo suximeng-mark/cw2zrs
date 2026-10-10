@@ -2091,7 +2091,7 @@ PluginPage {
                     Layout.fillWidth: true
                     icon.name: "ic_fluent_table_20_regular"
                     title: qsTr("值日表导出")
-                    description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记）；选择目录后同时导出 CSV 和 HTML")
+                    description: qsTr("按当前轮换规则生成未来排班，逐日一行（含周末与假期标记）；选择目录后同时导出 Excel、CSV 和 HTML")
 
                     ColumnLayout {
                         Layout.fillWidth: true
