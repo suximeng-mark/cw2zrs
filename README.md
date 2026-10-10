@@ -45,4 +45,4 @@ plugins/com.studentondutyshow.com/data/
 升级到 1.6.0 首次启动时，旧版存放在核心配置中的数据会自动一次性迁移到上述文件，并清空核心配置中的残留字段，无需手动处理。
 
 by 苏.su
-注：部分内容 AI 辅助研发
+注：部分内容 AI 辅助研发（deepseek-v4pro）
