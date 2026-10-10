@@ -40,6 +40,10 @@ jobs:
           cw-plugin-pack --format zip
 
       - name: Publish to plugin registry
+        # 广场是外部服务（plaza.cw.rinlit.cn），曾整站返回 402 DEPLOYMENT_DISABLED。
+        # 产物本身已由上一步构建完成，广场只负责列表分发，
+        # 因此这里不让它的抖动卡住 GitHub Release（真正的下载来源）。
+        continue-on-error: true
         env:
           CWPT_TOKEN: ${{ secrets.CWPT_TOKEN }}
         run: cw-plugin-publish
