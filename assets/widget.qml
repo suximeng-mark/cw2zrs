@@ -14,8 +14,11 @@ Widget {
     // 派生数据只算一次，供多个绑定复用：
     // tomorrow=明日预告；columnRows*=两列对齐的行数据（紧凑每人一行 / 普通按岗位）
     property var tomorrow: (root.duty && root.duty.tomorrow) ? root.duty.tomorrow : null
-    property var columnRowsPerson: root.duty ? root.columnRows(true) : []
-    property var columnRowsGrouped: root.duty ? root.columnRows(false) : []
+    // 两列对齐的行数据只在 columns 配对样式下被消费（两个 Repeater + 两处宽度度量），
+    // 其余样式下不必构建，也不必做 TextMetrics 测量
+    property bool twoColumns: root.duty ? (root.duty.pairStyle === "columns") : false
+    property var columnRowsPerson: (root.duty && root.twoColumns) ? root.columnRows(true) : []
+    property var columnRowsGrouped: (root.duty && root.twoColumns) ? root.columnRows(false) : []
 
     text: qsTr("今日值日生")
 
@@ -133,17 +136,13 @@ Widget {
     }
 
     // ------------------------------------------------ 明日预告
-    function tomorrowData() {
-        return root.tomorrow
-    }
-
     function tomorrowVisible() {
         return !!(root.duty && root.duty.showTomorrow && root.duty.tomorrow)
     }
 
     // 明日成员按当前配对样式拼成一行
     function tomorrowMembersText() {
-        var t = root.tomorrowData()
+        var t = root.tomorrow
         if (!t || !t.members || t.members.length === 0)
             return qsTr("（无值日生）")
         var labels = []
@@ -154,7 +153,7 @@ Widget {
 
     // 紧凑模式第四行完整文本（供宽度度量与显示共用）
     function tomorrowMiniText() {
-        var t = root.tomorrowData()
+        var t = root.tomorrow
         if (!t) return ""
         var s = t.shortDate + " " + t.weekday + " " + t.groupName + " · " + root.tomorrowMembersText()
         if (t.isHoliday)
@@ -203,25 +202,23 @@ Widget {
         return labels.join("、")
     }
 
-    function longestLeftText() {
-        if (!root.duty || !root.duty.members) return ""
-        var best = ""
+    // 两列对齐时取两列各自的最长文本（用于 TextMetrics 量宽度）
+    // key=取哪个字段（left/right），def=全员为空时的兜底值
+    function longestField(key, def) {
+        if (!root.duty || !root.duty.members) return def
+        var best = def
         var sets = [root.columnRowsPerson, root.columnRowsGrouped]
         for (var s = 0; s < sets.length; s++)
-            for (var i = 0; i < sets[s].length; i++)
-                if (sets[s][i].left.length > best.length) best = sets[s][i].left
+            for (var i = 0; i < sets[s].length; i++) {
+                var v = key === "left" ? sets[s][i].left : (sets[s][i].right || "")
+                if (v.length > best.length) best = v
+            }
         return best
     }
 
-    function longestRightText() {
-        if (!root.duty || !root.duty.members) return "—"
-        var best = "—"
-        var sets = [root.columnRowsPerson, root.columnRowsGrouped]
-        for (var s = 0; s < sets.length; s++)
-            for (var i = 0; i < sets[s].length; i++)
-                if ((sets[s][i].right || "").length > best.length) best = sets[s][i].right
-        return best
-    }
+    function longestLeftText() { return root.longestField("left", "") }
+
+    function longestRightText() { return root.longestField("right", "—") }
 
     // 两列对齐模式的行数据：{left, right, isTask}
     // perPerson=true（紧凑模式）：每个成员一行；false 时按岗位布局决定
@@ -434,6 +431,7 @@ Widget {
                            ? root.columnRowsPerson : 0
 
                     delegate: RowLayout {
+                        required property var modelData
                         spacing: 8
 
                         Text {
@@ -585,10 +583,11 @@ Widget {
 
             // 非两列模式：按行（连接符样式/岗位归并）
             Repeater {
-                model: root.pairStyle() !== "columns" ? root.rows : 0
+                model: root.rows
 
                 delegate: RowLayout {
                     Layout.fillWidth: true
+                    required property var modelData
                     spacing: 8
 
                     Text {
@@ -620,6 +619,7 @@ Widget {
 
                 delegate: RowLayout {
                     Layout.fillWidth: true
+                    required property var modelData
                     spacing: 8
 
                     Text {
@@ -671,7 +671,7 @@ Widget {
 
                 Text {
                     text: {
-                        var t = root.tomorrowData()
+                        var t = root.tomorrow
                         return t ? qsTr("明日 %1 %2").arg(t.shortDate).arg(t.weekday) : ""
                     }
                     font.pixelSize: root.fMeta()
@@ -690,7 +690,7 @@ Widget {
                     Text {
                         id: tomGroupNameText
                         anchors.centerIn: parent
-                        text: root.tomorrowData() ? root.tomorrowData().groupName : ""
+                        text: root.tomorrow ? root.tomorrow.groupName : ""
                         font.pixelSize: root.fMeta()
                         color: Colors.proxy.primaryColor
                     }
@@ -698,7 +698,7 @@ Widget {
 
                 // 明日恰逢假期时给出徽标
                 Rectangle {
-                    visible: root.tomorrowData() && root.tomorrowData().isHoliday
+                    visible: root.tomorrow && root.tomorrow.isHoliday
                     Layout.preferredHeight: Math.max(16, tomHolidayText.implicitHeight + 5)
                     Layout.preferredWidth: tomHolidayText.implicitWidth + 10
                     radius: height / 2
@@ -707,8 +707,8 @@ Widget {
                     Text {
                         id: tomHolidayText
                         anchors.centerIn: parent
-                        text: (root.tomorrowData() && root.tomorrowData().holidayName)
-                              ? root.tomorrowData().holidayName : qsTr("假期")
+                        text: (root.tomorrow && root.tomorrow.holidayName)
+                              ? root.tomorrow.holidayName : qsTr("假期")
                         color: "#FFFFFF"
                         font.pixelSize: Math.max(9, root.fMeta() - 1)
                     }

@@ -209,9 +209,10 @@ class Plugin(CW2Plugin):
         self._slots_cache: "OrderedDict[tuple, int]" = OrderedDict()
         # _units_to 记忆化：(轮换指纹, 日期) -> 原始累计档数，供临时合并判定复用
         self._units_memo: "OrderedDict[tuple, int]" = OrderedDict()
-        # 临时合并的两个派生缓存：key 变化即自动失效，无需手工清理
+        # 临时合并的三个派生缓存：key 变化即自动失效，无需手工清理
         self._merge_valid: Optional[tuple] = None    # 两端都计档的日期对
         self._merge_index: Optional[tuple] = None    # {日期: 对方日期}
+        self._merge_ends: Optional[tuple] = None     # 有效配对末日升序表（用于二分扣减）
         # 假期 fingerprint 缓存：仅当假期列表变化时重建（_elapsed_slots 每次调用无需重排序）
         self._holidays_fp: Optional[tuple] = None
         # 假期二分索引缓存（惰性构建，随 fingerprint 一起失效）
@@ -531,23 +532,25 @@ class Plugin(CW2Plugin):
             return None
         return payload if isinstance(payload, dict) else None
 
+    @staticmethod
+    def _members_payload(group: DutyGroup) -> List[Dict[str, str]]:
+        """一组成员的 [{"name", "task"}] 形式（成员列表的所有出口共用）。"""
+        return [{"name": m.name, "task": m.task} for m in group.members]
+
     def _groups_payload(self) -> List[Dict[str, Any]]:
-        """分组的可序列化形式（配置、导出、备份共用）。"""
+        """分组的可序列化形式（配置、导出、备份、get_groups 共用）。"""
         return [
-            {
-                "name": g.name,
-                "members": [
-                    {"name": m.name, "task": m.task}
-                    for m in g.members
-                ],
-            }
+            {"name": g.name, "members": self._members_payload(g)}
             for g in self._groups
         ]
 
     def _holidays_payload(self) -> List[Dict[str, Any]]:
-        """假期的可序列化形式（配置、导出、备份共用）。"""
+        """假期的可序列化形式（配置、导出、备份、get_holidays 共用）。
+
+        end 缺省时回退 start：_parse_holidays 总会填满，这里只是保持旧输出一致。
+        """
         return [
-            {"start": h.start, "end": h.end, "name": h.name}
+            {"start": h.start, "end": h.end or h.start, "name": h.name}
             for h in self._holidays
         ]
 
@@ -873,7 +876,9 @@ class Plugin(CW2Plugin):
 
         「是否计档」只取决于配置、与查询日期无关，所以整月 42 天只需算一次；
         之前每天都要对每一对重复做日期解析 + 4 次 _units_to，是月历的主要热点。
-        顺序必须保持配置顺序：used 集合按此顺序分配，重排会改变扣减结果。
+        顺序必须保持配置顺序：扣减的兜底路径按此顺序分配，重排会改变结果。
+
+        顺带把「末日升序表」算进 _merge_ends，供 _merge_reduction 二分使用。
         """
         key = (self._rotation_fingerprint(), tuple(self._merge_pairs))
         cached = self._merge_valid
@@ -881,33 +886,50 @@ class Plugin(CW2Plugin):
             return cached[1]
 
         pairs: List[tuple] = []
+        seen: set = set()
+        overlap = False
         for a_iso, b_iso in self._merge_pairs:
             try:
                 a, b = date.fromisoformat(a_iso), date.fromisoformat(b_iso)
             except ValueError:
                 continue
-            if self._counts_day(a) and self._counts_day(b):
-                pairs.append((a, b))
+            if not (self._counts_day(a) and self._counts_day(b)):
+                continue
+            pairs.append((a, b))
+            if a in seen or b in seen:
+                overlap = True
+            seen.add(a)
+            seen.add(b)
         self._merge_valid = (key, pairs)
+        # 端点互不重叠时（_parse_merge_pairs 已保证，理论上不会走到另一分支），
+        # 「扣减几档」只取决于末日 <= 查询日的对数，可以二分；
+        # 一旦真出现重叠，置 None 让 _merge_reduction 退回逐对扫描。
+        self._merge_ends = None if overlap else tuple(sorted(b for _, b in pairs))
         return pairs
 
-    def _merge_reduction(self, start: date, today: date) -> int:
+    def _merge_reduction(self, today: date) -> int:
         """临时合并扣减的档数：每一对有效日期合计 1 档，故总档数 -1。
 
         生效条件：两端都必须是计档日（假期等不计档的日期无从合并），
         且另一端不能晚于 today（还没到就不折算）。
+
+        复杂度 O(log P)：端点互不重叠时扣减数就是「末日 <= today 的有效对数」。
         """
         if not self._merge_pairs:
             return 0
-        reduction = 0
-        used: set = set()
-        for a, b in self._valid_merge_pairs():  # 已按 (A, B) 升序、且两端都计档
-            if b > today or a in used or b in used:
-                continue
-            reduction += 1
-            used.add(a)
-            used.add(b)
-        return reduction
+        self._valid_merge_pairs()  # 确保 _merge_ends 与当前配置同步
+        ends = self._merge_ends
+        if ends is None:  # 端点重叠（理论外）：按配置顺序逐对判定，保持旧语义
+            reduction = 0
+            used: set = set()
+            for a, b in self._valid_merge_pairs():
+                if b > today or a in used or b in used:
+                    continue
+                reduction += 1
+                used.add(a)
+                used.add(b)
+            return reduction
+        return bisect_right(ends, today)
 
     def _merge_partner_map(self) -> Dict[str, str]:
         """{日期 ISO: 对方日期 ISO} 索引，供月历与排班表 O(1) 查询。
@@ -936,8 +958,66 @@ class Plugin(CW2Plugin):
         if today <= start:
             return 0
         units = self._compute_elapsed_slots(start, today)
-        units -= self._merge_reduction(start, today)
+        units -= self._merge_reduction(today)
         return units if units > 0 else 0
+
+    def _day_delta(self, day: date) -> int:
+        """该日为累计档数贡献的增量（0 或 1）。
+
+        units(d) - units(d-1) 的闭式写法：只取决于当天与配置，与查询区间无关。
+        连续多日查询时用它做前缀累加，就能把「N 天各从起始日算一遍」的
+        O(N × 跨度) 降成 O(N)。等价性由 tests/test_rotation.py 的差分用例保证。
+        """
+        start = self._start_day
+        if day <= start:
+            return 0
+
+        if self._rotation_mode == MODE_WEEKLY:
+            # 区块 [start+7k, start+7k+6]：只在区块首日 +1，整周都是假期则不计
+            k = (day - start).days
+            if k % 7:
+                return 0
+            merged_starts, merged = self._holiday_index()
+            i = bisect_right(merged_starts, day) - 1
+            if i >= 0 and merged[i][1] >= day + timedelta(days=6):
+                return 0
+            return 1
+
+        if self._is_holiday(day):
+            return 0
+        # daily 与 workday/each 都是「每个非假期自然日 +1」
+        if self._rotation_mode == MODE_DAILY or self._weekend_mode == WEEKEND_EACH:
+            return 1
+
+        wd = day.weekday()
+        if wd < 5:
+            return 1
+        if self._weekend_mode == WEEKEND_SKIP:
+            return 0
+        if wd == 5:
+            return 1  # 周六代表整个周末档
+        # 周日：仅当其周六为假期（周六被跳过、未计档）且周六晚于起始日时补一档
+        one = timedelta(days=1)
+        return 1 if (day > start + one and self._is_holiday(day - one)) else 0
+
+    def _units_series(self, first: date, count: int) -> List[int]:
+        """连续 count 天（自 first 起）各自累计的原始档数（已扣合并、未除步长）。
+
+        一次前向扫描取代「每天各调一次 _units_elapsed」，
+        月历 42 天 / 排班 182 天因此从 O(N × 起始至今) 降为 O(N)。
+        """
+        start = self._start_day
+        raw = self._compute_elapsed_slots(start, first)
+        one = timedelta(days=1)
+        day = first
+        series: List[int] = []
+        for i in range(count):
+            if i:
+                raw += self._day_delta(day)
+            units = raw - self._merge_reduction(day)
+            series.append(units if units > 0 else 0)
+            day += one
+        return series
 
     def _slot_progress(self, day: date) -> tuple:
         """当前这一「次值日」的进度：(档内第几个单位, 每档单位数)。
@@ -1033,21 +1113,31 @@ class Plugin(CW2Plugin):
         idx = (slots + self._manual_offset) % len(groups)
         return slots, idx, groups[idx]
 
-    def _actual_group_for_day(self, day: date) -> Optional[tuple]:
-        """含临时调班的当日值日：(slots, idx, group, auto_idx, is_swap)。
+    def _group_result(self, slots: int, day: date) -> Optional[tuple]:
+        """已知档数时的当日值日结果：(slots, idx, group, auto_idx, is_swap)。
 
-        若该日期在 _temp_swaps 中存在合法组下标，则覆盖自动轮换结果；
-        否则回退到 _group_for_day（自动轮换 + 手动偏移）。
+        把「算档数」与「按档数取组」拆开：连续多日的场景（月历 / 排班）
+        可以用 _units_series 一次算完全部档数，再复用这里的取组逻辑，
+        不必每天都走一遍 _elapsed_slots。
         """
         groups = self._groups
         if not groups:
             return None
-        slots, auto_idx, _ = self._group_for_day(day)
-        iso = day.isoformat()
-        swap_idx = self._temp_swaps.get(iso)
+        auto_idx = (slots + self._manual_offset) % len(groups)
+        swap_idx = self._temp_swaps.get(day.isoformat())
         if swap_idx is not None and 0 <= swap_idx < len(groups):
             return slots, swap_idx, groups[swap_idx], auto_idx, True
         return slots, auto_idx, groups[auto_idx], auto_idx, False
+
+    def _actual_group_for_day(self, day: date) -> Optional[tuple]:
+        """含临时调班的当日值日：(slots, idx, group, auto_idx, is_swap)。
+
+        若该日期在 _temp_swaps 中存在合法组下标，则覆盖自动轮换结果；
+        否则回退到自动轮换 + 手动偏移。
+        """
+        if not self._groups:
+            return None
+        return self._group_result(self._elapsed_slots(day), day)
 
     def _persist(self) -> None:
         # 只写插件私有配置文件（小、防抖），完全不触碰核心 configs.json
@@ -1089,10 +1179,7 @@ class Plugin(CW2Plugin):
             "sameAsToday": idx == today_idx,
             "isHoliday": bool(holiday),
             "holidayName": holiday,
-            "members": [
-                {"name": m.name, "task": m.task}
-                for m in group.members
-            ],
+            "members": self._members_payload(group),
         }
 
     # ------------------------------------------------- history (standalone)
@@ -1294,16 +1381,7 @@ class Plugin(CW2Plugin):
 
     @Slot(result="QVariant")
     def get_groups(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                "name": g.name,
-                "members": [
-                    {"name": m.name, "task": m.task}
-                    for m in g.members
-                ],
-            }
-            for g in self._groups
-        ]
+        return self._groups_payload()
 
     @Slot(str, str, "QVariant")
     def save_all(self, start_date: str, rotation_mode: str, data: Any) -> None:
@@ -1349,11 +1427,12 @@ class Plugin(CW2Plugin):
         self._slots_cache.clear()
         self._persist()
         logger.info(f"[值日生] 周末处理方式已保存：{mode}")
+        return True
 
     @Slot(result="QVariant")
     def get_merge_pairs(self) -> List[Dict[str, str]]:
         """临时合并的日期对：[{"a": 日期A, "b": 日期B}]，每对合计 1 档。"""
-        return [{"a": a, "b": b} for a, b in self._merge_pairs]
+        return self._merge_pairs_payload()
 
     @Slot(str, str, result=bool)
     def add_merge_pair(self, day_a: str, day_b: str) -> bool:
@@ -1425,7 +1504,6 @@ class Plugin(CW2Plugin):
             self._persist()
             logger.info(f"[值日生] 轮换步长已保存：每 {value} 个单位换一次")
         return True
-        return True
 
     # --------------------------------------------------------- display
     @Slot(result="QVariant")
@@ -1489,10 +1567,7 @@ class Plugin(CW2Plugin):
     # -------------------------------------------------------------- holidays
     @Slot(result="QVariant")
     def get_holidays(self) -> List[Dict[str, Any]]:
-        return [
-            {"start": h.start, "end": h.end or h.start, "name": h.name}
-            for h in self._holidays
-        ]
+        return self._holidays_payload()
 
     @Slot("QVariant", result=bool)
     def save_holidays(self, data: Any) -> bool:
@@ -1529,15 +1604,14 @@ class Plugin(CW2Plugin):
     @Slot(result="QVariant")
     def get_stats(self) -> Dict[str, Any]:
         per_person: Dict[str, Dict[str, Any]] = {}
-        recent: List[Dict[str, Any]] = []
 
         records = sorted(self._history, key=lambda r: r["date"])
+        # 按人统计必须遍历全部记录；但「最近记录」只取末 15 条，
+        # 所以成员明细只为这 15 条构建——旧实现给每条记录都建一份，
+        # 400 天 × 数名成员里 96% 的字典刚建完就被丢掉。
         for r in records:
             seen = set()
-            switched = bool(r["auto_group_name"]) and r["group_name"] != r["auto_group_name"]
-            members_out = []
             for m in r["members"]:
-                members_out.append({"name": m["name"], "task": m["task"], "status": m["status"]})
                 if not m["name"] or m["name"] in seen:
                     continue
                 seen.add(m["name"])
@@ -1548,12 +1622,22 @@ class Plugin(CW2Plugin):
                 entry["count"] += 1
                 if m["status"] == STATUS_ABSENT:
                     entry["absent"] += 1
-            recent.append({
+
+        recent: List[Dict[str, Any]] = [
+            {
                 "date": r["date"],
                 "groupName": r["group_name"],
-                "switched": switched,
-                "members": members_out,
-            })
+                "switched": (
+                    bool(r["auto_group_name"])
+                    and r["group_name"] != r["auto_group_name"]
+                ),
+                "members": [
+                    {"name": m["name"], "task": m["task"], "status": m["status"]}
+                    for m in r["members"]
+                ],
+            }
+            for r in records[-15:][::-1]
+        ]
 
         rows = sorted(
             per_person.values(),
@@ -1931,14 +2015,25 @@ class Plugin(CW2Plugin):
         """逐日生成排班行，轮换结果与 widget 完全一致（含手动换组偏移）。"""
         groups = self._groups
         offset = self._manual_offset
+        step = self._slot_days
+        span = weeks * 7
+        # 一次前向扫描算完全部档数（旧实现每天各从起始日重算一遍）
+        series = self._units_series(start_day, span)
+        partner_map = self._merge_partner_map()
+        # 成员行文本只有 len(groups) 种取值，预生成一次，
+        # 避免 182 天 × N 名成员反复做同样的字符串拼接
+        member_lines = [self._member_line(g, empty_text="（无成员）") for g in groups]
+        one = timedelta(days=1)
+
         rows: List[Dict[str, str]] = []
-        for k in range(weeks * 7):
-            day = start_day + timedelta(days=k)
-            slots = self._elapsed_slots(day)
+        day = start_day
+        for k in range(span):
+            units = series[k]
+            slots = units // step if step > 1 else units
             idx = (slots + offset) % len(groups)
             group = groups[idx]
 
-            members_text = self._member_line(group, empty_text="（无成员）")
+            members_text = member_lines[idx]
 
             holiday = self._holiday_name(day)
             if holiday:
@@ -1948,15 +2043,14 @@ class Plugin(CW2Plugin):
             else:
                 note = ""
 
-            partner = self._merge_partner(day)
+            partner = partner_map.get(day.isoformat(), "")
             if partner:
                 note = f"{note} · 与 {partner} 合并计 1 档" if note else f"与 {partner} 合并计 1 档"
 
             # 轮次：步长 > 1 时同一组内多天共享一个「值日次数」
             period = f"{slots + 1}"
-            if self._slot_days > 1:
-                pos, _ = self._slot_progress(day)
-                period += f"（{pos}/{self._slot_days}）"
+            if step > 1:
+                period += f"（{units % step + 1}/{step}）"
 
             rows.append({
                 "date": day.isoformat(),
@@ -1966,6 +2060,7 @@ class Plugin(CW2Plugin):
                 "period": period,
                 "note": note,
             })
+            day += one
         return rows
 
     @staticmethod
@@ -2087,12 +2182,21 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
         grid_start = first - timedelta(days=first.weekday())
         grid_end = last + timedelta(days=6 - last.weekday())
 
+        # 整段连续日期一次前向扫描算完档数（旧实现每天各从起始日重算一遍）
+        span = (grid_end - grid_start).days + 1
+        step = self._slot_days
+        series = self._units_series(grid_start, span)
+        partner_map = self._merge_partner_map()
+        one = timedelta(days=1)
+
         days: List[Dict[str, Any]] = []
         cur = grid_start
-        while cur <= grid_end:
-            found = self._actual_group_for_day(cur)
+        for k in range(span):
+            units = series[k]
+            slots = units // step if step > 1 else units
+            found = self._group_result(slots, cur)
             auto_idx = found[3] if found else 0
-            partner = self._merge_partner(cur)  # 只查一次：内部要遍历全部日期对
+            partner = partner_map.get(cur.isoformat(), "")
             days.append({
                 "date": cur.isoformat(),
                 "day": cur.day,
@@ -2106,7 +2210,7 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
                 "isMerge": bool(partner),
                 "mergeWith": partner,
             })
-            cur += timedelta(days=1)
+            cur += one
         return {"year": first.year, "month": first.month, "days": days}
 
     @Slot(result="QVariant")
@@ -2139,10 +2243,7 @@ tr.weekend td {{ background: #F4F4F7; color: #777; }}
                 entry["groupName"] = group.name
                 entry["autoGroupName"] = self._groups[auto_idx].name
                 entry["isSwap"] = is_swap
-                entry["members"] = [
-                    {"name": m.name, "task": m.task}
-                    for m in group.members
-                ]
+                entry["members"] = self._members_payload(group)
             days.append(entry)
         return {
             "monday": monday.isoformat(),

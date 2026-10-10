@@ -100,11 +100,13 @@ PluginPage {
         return i >= 0 ? i : 0
     }
 
+    // 两位补零（saveStamp / nextDayOf / 设为今天 共用）
+    function pad2(n) { return String(n).padStart(2, "0") }
+
     function saveStamp() {
         var d = new Date()
-        function p(n) { return String(n).padStart(2, "0") }
-        return d.getFullYear() + "/" + p(d.getMonth() + 1) + "/" + p(d.getDate())
-               + " " + p(d.getHours()) + ":" + p(d.getMinutes())
+        return d.getFullYear() + "/" + root.pad2(d.getMonth() + 1) + "/" + root.pad2(d.getDate())
+               + " " + root.pad2(d.getHours()) + ":" + root.pad2(d.getMinutes())
     }
 
     function clone(o) {
@@ -141,7 +143,7 @@ PluginPage {
         return root.urlToLocalPath(u)
     }
 
-    function requestFile(action, mode, dlg) {
+    function requestFile(action, dlg) {
         root.fileDialogAction = action
         dlg.open()
     }
@@ -268,7 +270,7 @@ PluginPage {
     function taskMemberNames() {
         root.editRev
         var out = []
-        var rows = root.taskRows()
+        var rows = root.taskRowData
         for (var i = 0; i < rows.length; i++) {
             var who = rows[i].name || qsTr("成员%1").arg(rows[i].index + 1)
             out.push(who + (rows[i].task ? "（" + rows[i].task + "）" : ""))
@@ -367,6 +369,15 @@ PluginPage {
         return (g && g.members) ? g.members : []
     }
 
+    // ===== 派生数据：多处绑定共用同一份结果，只算一次 =====
+    // 原先每个绑定各调一遍函数（taskRows 一页内被算了 6 次、previewRows 2 次），
+    // 数据刷新时重复构建数组；收敛成 property 后由 QML 自动缓存并随依赖更新。
+    property var groupNames: root.groupNamesList()             // 组名下拉
+    property var currentMembers: root.membersOfCurrent()       // 当前组的成员
+    property var previewRowData: root.previewRows()            // 预览：非两列模式
+    property var previewColRowData: root.previewColumnRows()   // 预览：两列对齐
+    property var taskRowData: root.taskRows()                  // 临时调整：本轮成员
+
     function addMember() {
         var g = root.groupAt(root.currentGroupIndex)
         if (!g) return
@@ -434,6 +445,15 @@ PluginPage {
     }
 
     // 周末处理方式（仅工作日轮换生效）
+    // 三个轮换模式单选按钮走同一条「存 → 刷新 → 提示」路径
+    function applyRotationMode(mode, label) {
+        if (root.rotationMode === mode) return
+        root.rotationMode = mode
+        root.doSave()
+        root.refreshTodayStats()
+        root.setResult(rotationResultText, qsTr("已切换为%1 ").arg(label) + root.saveStamp(), true)
+    }
+
     function applyWeekendMode(mode) {
         if (!root.backend || root.weekendMode === mode) return
         var ok = false
@@ -478,26 +498,26 @@ PluginPage {
         var p = iso.split("-")
         var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]))
         d.setDate(d.getDate() + 1)
-        function pad(n) { return String(n).padStart(2, "0") }
-        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+        return d.getFullYear() + "-" + root.pad2(d.getMonth() + 1) + "-" + root.pad2(d.getDate())
+    }
+
+    // 某日已与之合并的日期；未合并返回空串（只查一次，两个入口共用）
+    function mergePartnerOf(iso) {
+        for (var i = 0; i < root.mergePairs.length; i++) {
+            var p = root.mergePairs[i]
+            if (p.a === iso) return p.b
+            if (p.b === iso) return p.a
+        }
+        return ""
     }
 
     // 已合并则返回对方日期，否则给出默认的次日
     function selectedMergeDefault() {
-        for (var i = 0; i < root.mergePairs.length; i++) {
-            var p = root.mergePairs[i]
-            if (p.a === root.selectedDate) return p.b
-            if (p.b === root.selectedDate) return p.a
-        }
-        return root.nextDayOf(root.selectedDate)
+        return root.mergePartnerOf(root.selectedDate) || root.nextDayOf(root.selectedDate)
     }
 
     function selectedIsMerged() {
-        for (var i = 0; i < root.mergePairs.length; i++) {
-            var p = root.mergePairs[i]
-            if (p.a === root.selectedDate || p.b === root.selectedDate) return true
-        }
-        return false
+        return root.mergePartnerOf(root.selectedDate) !== ""
     }
 
     function reloadMergePairs() {
@@ -759,8 +779,12 @@ PluginPage {
             var m = ms[j]
             if (root.memberLayout === "person") {
                 out.push({ task: "", names: [root.previewPair(m)] })
-            } else if (root.previewTask(m)) {
-                var t = root.previewTask(m), nm = root.previewName(m)
+                continue
+            }
+            // previewTask / previewName 各只取一次（原来 else-if 里取了两次）
+            var t = root.previewTask(m)
+            if (t) {
+                var nm = root.previewName(m)
                 if (taskIndex[t] === undefined) {
                     taskIndex[t] = out.length
                     out.push({ task: t, names: nm ? [nm] : [] })
@@ -1090,7 +1114,7 @@ PluginPage {
 
                                 // 成员区：非两列模式
                                 Repeater {
-                                    model: root.previewRows()
+                                    model: root.previewRowData
 
                                     delegate: RowLayout {
                                         required property var modelData
@@ -1120,7 +1144,7 @@ PluginPage {
 
                                 // 成员区：两列对齐
                                 Repeater {
-                                    model: root.previewColumnRows()
+                                    model: root.previewColRowData
 
                                     delegate: RowLayout {
                                         required property var modelData
@@ -1154,8 +1178,8 @@ PluginPage {
                                 }
 
                                 Text {
-                                    visible: root.previewRows().length === 0
-                                             && root.previewColumnRows().length === 0
+                                    visible: root.previewRowData.length === 0
+                                             && root.previewColRowData.length === 0
                                     text: qsTr("（今日暂无值日成员，预览为空）")
                                     font.pixelSize: 12
                                     opacity: 0.5
@@ -1191,7 +1215,7 @@ PluginPage {
                             ComboBox {
                                 id: groupCombo
                                 Layout.preferredWidth: 180
-                                model: root.groupNamesList()
+                                model: root.groupNames
                                 currentIndex: root.currentGroupIndex
                                 onActivated: {
                                     root.currentGroupIndex = groupCombo.currentIndex
@@ -1282,7 +1306,7 @@ PluginPage {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            visible: root.membersOfCurrent().length > 0
+                            visible: root.currentMembers.length > 0
 
                             Text { text: qsTr("#"); Layout.preferredWidth: 24; opacity: 0.5; font.pixelSize: 12 }
                             Text { text: qsTr("姓名"); Layout.fillWidth: true; opacity: 0.5; font.pixelSize: 12 }
@@ -1291,7 +1315,7 @@ PluginPage {
                         }
 
                         Repeater {
-                            model: root.membersOfCurrent()
+                            model: root.currentMembers
 
                             delegate: RowLayout {
                                 required property int index
@@ -1330,7 +1354,7 @@ PluginPage {
                         }
 
                         Text {
-                            visible: root.membersOfCurrent().length === 0
+                            visible: root.currentMembers.length === 0
                             text: qsTr("当前组还没有成员，点击下方按钮新增或快速导入")
                             opacity: 0.55
                             font.pixelSize: 12
@@ -1361,7 +1385,7 @@ PluginPage {
                                 text: qsTr("导入配置表")
                                 onClicked: {
                                     openDialog.title = qsTr("选择配置表")
-                                    root.requestFile("importConfig", "open", openDialog)
+                                    root.requestFile("importConfig", openDialog)
                                 }
                             }
 
@@ -1369,7 +1393,7 @@ PluginPage {
                                 text: qsTr("导出配置表")
                                 onClicked: {
                                     saveDialog.title = qsTr("导出配置表到…")
-                                    root.requestFile("exportConfig", "save", saveDialog)
+                                    root.requestFile("exportConfig", saveDialog)
                                 }
                             }
 
@@ -1410,35 +1434,17 @@ PluginPage {
                             RadioButton {
                                 text: qsTr("每日轮换")
                                 checked: root.rotationMode === "daily"
-                                onClicked: {
-                                    if (root.rotationMode === "daily") return
-                                    root.rotationMode = "daily"
-                                    root.doSave()
-                                    root.refreshTodayStats()
-                                    root.setResult(rotationResultText, qsTr("已切换为每日轮换 ") + root.saveStamp(), true)
-                                }
+                                onClicked: root.applyRotationMode("daily", qsTr("每日轮换"))
                             }
                             RadioButton {
                                 text: qsTr("工作日轮换")
                                 checked: root.rotationMode === "workday"
-                                onClicked: {
-                                    if (root.rotationMode === "workday") return
-                                    root.rotationMode = "workday"
-                                    root.doSave()
-                                    root.refreshTodayStats()
-                                    root.setResult(rotationResultText, qsTr("已切换为工作日轮换 ") + root.saveStamp(), true)
-                                }
+                                onClicked: root.applyRotationMode("workday", qsTr("工作日轮换"))
                             }
                             RadioButton {
                                 text: qsTr("每周轮换")
                                 checked: root.rotationMode === "weekly"
-                                onClicked: {
-                                    if (root.rotationMode === "weekly") return
-                                    root.rotationMode = "weekly"
-                                    root.doSave()
-                                    root.refreshTodayStats()
-                                    root.setResult(rotationResultText, qsTr("已切换为每周轮换 ") + root.saveStamp(), true)
-                                }
+                                onClicked: root.applyRotationMode("weekly", qsTr("每周轮换"))
                             }
                         }
 
@@ -1523,9 +1529,9 @@ PluginPage {
                                 text: qsTr("设为今天")
                                 onClicked: {
                                     var d = new Date()
-                                    var mm = String(d.getMonth() + 1).padStart(2, "0")
-                                    var dd = String(d.getDate()).padStart(2, "0")
-                                    root.startDateText = d.getFullYear() + "-" + mm + "-" + dd
+                                    root.startDateText = d.getFullYear() + "-"
+                                                         + root.pad2(d.getMonth() + 1) + "-"
+                                                         + root.pad2(d.getDate())
                                     startField.text = root.startDateText
                                     root.doSave()
                                     root.refreshTodayStats()
@@ -1831,7 +1837,7 @@ PluginPage {
                                 ComboBox {
                                     id: calSwapCombo
                                     Layout.preferredWidth: 140
-                                    model: root.groupNamesList()
+                                    model: root.groupNames
                                 }
                                 Button {
                                     text: qsTr("应用调班")
@@ -2139,7 +2145,7 @@ PluginPage {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            visible: root.taskRows().length > 1
+                            visible: root.taskRowData.length > 1
 
                             Label { text: qsTr("互换"); opacity: 0.7; font.pixelSize: 12 }
                             ComboBox {
@@ -2171,7 +2177,7 @@ PluginPage {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            visible: root.taskRows().length > 0
+                            visible: root.taskRowData.length > 0
 
                             Text { text: qsTr("#"); Layout.preferredWidth: 24; opacity: 0.5; font.pixelSize: 12 }
                             Text { text: qsTr("姓名"); Layout.preferredWidth: 84; opacity: 0.5; font.pixelSize: 12 }
@@ -2181,7 +2187,7 @@ PluginPage {
                         }
 
                         Repeater {
-                            model: root.taskRows()
+                            model: root.taskRowData
 
                             delegate: RowLayout {
                                 id: taskRow
@@ -2228,7 +2234,7 @@ PluginPage {
                         }
 
                         Text {
-                            visible: root.taskRows().length === 0
+                            visible: root.taskRowData.length === 0
                             text: qsTr("当前没有值日成员，请先在「人员设置」中配置分组与成员")
                             opacity: 0.55
                             font.pixelSize: 12
@@ -2266,11 +2272,16 @@ PluginPage {
                     Layout.fillWidth: true
                     icon.name: "ic_fluent_person_prohibited_20_regular"
                     title: qsTr("今日请假")
-                    description: root.todayData
-                                 ? root.todayData.date + " · " + root.todayData.groupName
-                                   + (root.todayData.isHoliday ? " · " + (root.todayData.holidayName || qsTr("假期中")) : "")
-                                   + (root.todayData.switched ? " · " + qsTr("已手动调换") : "")
-                                 : qsTr("暂无数据")
+                    description: {
+                        var d = root.todayData
+                        if (!d) return qsTr("暂无数据")
+                        var s = d.date + " · " + d.groupName
+                        if (d.isHoliday)
+                            s += " · " + (d.holidayName || qsTr("假期中"))
+                        if (d.switched)
+                            s += " · " + qsTr("已手动调换")
+                        return s
+                    }
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -2604,7 +2615,7 @@ PluginPage {
                                 text: qsTr("导出备份到…")
                                 onClicked: {
                                     saveDialog.title = qsTr("导出备份到…")
-                                    root.requestFile("exportBackup", "save", saveDialog)
+                                    root.requestFile("exportBackup", saveDialog)
                                 }
                             }
 
@@ -2613,7 +2624,7 @@ PluginPage {
                                 highlighted: true
                                 onClicked: {
                                     openDialog.title = qsTr("选择备份文件")
-                                    root.requestFile("importBackup", "open", openDialog)
+                                    root.requestFile("importBackup", openDialog)
                                 }
                             }
 
@@ -2952,7 +2963,7 @@ PluginPage {
     }
 
     Connections {
-        target: root.backend ? root.backend : null
+        target: root.backend
         function onDutyChanged() { root.refreshTodayStats() }
     }
 }

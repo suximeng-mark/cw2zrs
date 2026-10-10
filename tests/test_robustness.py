@@ -67,6 +67,7 @@ def make_plugin(groups=None, start: str = "2020-01-01", mode: str = m.MODE_DAILY
     p._units_memo = OrderedDict()
     p._merge_valid = None
     p._merge_index = None
+    p._merge_ends = None
     p._start_date = start
     p._start_day = date.fromisoformat(start)
     p._rotation_mode = mode

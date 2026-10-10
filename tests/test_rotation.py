@@ -133,6 +133,7 @@ def make_plugin(
     p._units_memo = OrderedDict()
     p._merge_valid = None
     p._merge_index = None
+    p._merge_ends = None
     return p
 
 
@@ -519,6 +520,85 @@ def test_merge_pairs() -> None:
     check("legacy 丢非法", m.Plugin._parse_merge_days(["x", None, "2026-13-01"]), [])
 
 
+def ref_merge_reduction_scan(p: "m.Plugin", today: date) -> int:
+    """旧实现：按配置顺序逐对扫描扣减（不依赖 _merge_ends 二分）。"""
+    reduction = 0
+    used = set()
+    for a, b in p._valid_merge_pairs():
+        if b > today or a in used or b in used:
+            continue
+        reduction += 1
+        used.add(a)
+        used.add(b)
+    return reduction
+
+
+def ref_units_elapsed(p: "m.Plugin", today: date) -> int:
+    """旧实现：逐日计算 + 逐对扫描扣减。"""
+    start = p._start_day
+    if today <= start:
+        return 0
+    units = p._compute_elapsed_slots(start, today)
+    units -= ref_merge_reduction_scan(p, today)
+    return units if units > 0 else 0
+
+
+def test_units_series(n: int = 300, seed: int = 7) -> None:
+    """连续多日的前缀扫描必须与逐日计算逐点一致。
+
+    _units_series 是性能关键路径：月历 42 天、值日表 182 天都靠它把
+    「每天各从起始日算一遍」的 O(N × 跨度) 降为 O(N)。
+    这里用旧的逐对扫描扣减作参照，同时验证 _merge_reduction 的二分写法
+    与逐对扫描等价（端点互不重叠时二者必然相等）。
+    """
+    rng = random.Random(seed)
+    base = date(2025, 1, 1)
+    for i in range(n):
+        start = base + timedelta(days=rng.randint(0, 700))
+        mode = rng.choice(m.VALID_MODES)
+        wm = rng.choice(m.VALID_WEEKEND_MODES) if mode == m.MODE_WORKDAY else "merge"
+        holidays = []
+        for _ in range(rng.randint(0, 6)):
+            hs = base + timedelta(days=rng.randint(-30, 1600))
+            he = hs + timedelta(days=rng.randint(0, rng.choice([0, 1, 3, 10, 62])))
+            holidays.append({"start": hs.isoformat(), "end": he.isoformat(),
+                             "name": ""})
+        # 临时合并：随机若干互不重叠的日期对
+        pairs = []
+        seen_days = set()
+        for _ in range(rng.randint(0, 6)):
+            a = start + timedelta(days=rng.randint(0, 400))
+            b = a + timedelta(days=rng.randint(1, 30))
+            if a in seen_days or b in seen_days:
+                continue
+            seen_days.add(a)
+            seen_days.add(b)
+            pairs.append({"a": a.isoformat(), "b": b.isoformat()})
+
+        p = make_plugin(mode, start.isoformat(), holidays, wm,
+                        slot_days=rng.choice([1, 1, 2, 3]), merge_pairs=pairs)
+
+        # 二分扣减 vs 逐对扫描
+        for j in range(3):
+            d = start + timedelta(days=rng.randint(-20, 500))
+            check(f"reduction#{i}.{j}", p._merge_reduction(d),
+                  ref_merge_reduction_scan(p, d))
+
+        # 连续窗口的前缀扫描 vs 逐日计算
+        first = start + timedelta(days=rng.randint(-20, 60))
+        count = rng.choice([1, 7, 42, 60])
+        series = p._units_series(first, count)
+        check(f"series#{i} 长度", len(series), count)
+        for k in range(count):
+            day = first + timedelta(days=k)
+            want = ref_units_elapsed(p, day)
+            if series[k] != want:
+                check(f"series#{i} {mode}/{wm} {day}", series[k], want)
+                break
+        else:
+            check(f"series#{i} {mode}/{wm}", True, True)
+
+
 def main() -> int:
     test_manual_cases()
     test_holiday_lookup_equiv()
@@ -526,6 +606,7 @@ def main() -> int:
     test_slot_days()
     test_merge_pairs()
     test_random_differential()
+    test_units_series()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
