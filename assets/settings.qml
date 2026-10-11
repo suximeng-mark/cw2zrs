@@ -22,7 +22,64 @@ PluginPage {
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": [], "byWeek": [], "byGroup": []}
 
-    // 统计图表的派生数据：柱高 / 条长比例在这里算好再交给 delegate。
+    property var updateState: {"status": "idle", "latest": "", "current": "",
+                               "download": "", "page": "", "msg": ""}
+    property bool updateAuto: false
+    property string updateSource: ""
+    // 备用地址输入框只在首次加载时回填，之后不覆盖用户正在编辑的内容
+    property bool updateSourceInit: false
+
+    // ===== 备用更新服务 =====
+    function reloadUpdateState() {
+        if (!root.backend) return
+        root.updateState = root.backend.get_update_state()
+        root.updateAuto = root.updateState.auto
+        if (!root.updateSourceInit) {
+            root.updateSource = root.updateState.builtin ? "" : root.updateState.source
+            root.updateSourceInit = true
+        }
+    }
+
+    function pushUpdateSettings() {
+        if (!root.backend) return
+        root.backend.save_update_settings(root.updateAuto, root.updateSource)
+    }
+
+    function saveUpdateAuto(on) {
+        root.updateAuto = on
+        root.pushUpdateSettings()
+    }
+
+    function saveUpdateSource(text) {
+        root.updateSource = String(text || "").trim()
+        root.pushUpdateSettings()
+    }
+
+    function checkUpdateNow() {
+        if (!root.backend) return
+        root.pushUpdateSettings()          // 先把当前输入的地址存下去再查
+        if (root.backend.check_update())
+            root.updateState = root.backend.get_update_state()
+        else
+            root.setResult(updateResultText, qsTr("正在检查中，请稍候"), true)
+    }
+
+    function openUpdateLink() {
+        if (!root.backend) return
+        if (!root.backend.open_update_link())
+            root.setResult(updateResultText, qsTr("没有可打开的更新链接"), false)
+    }
+
+    function updateStatusText() {
+        var s = root.updateState || {}
+        if (s.status === "checking") return qsTr("正在检查更新…")
+        if (s.status === "available")
+            return qsTr("发现新版本 %1（当前 %2）").arg(s.latest).arg(s.current)
+        if (s.status === "latest")
+            return qsTr("已是最新版本 %1").arg(s.current || "")
+        if (s.status === "error") return qsTr("检查失败：%1").arg(s.msg || "")
+        return qsTr("尚未检查更新")
+    }
     // 两个原因：一是比例尺只算一次而不是每根柱子各算一遍；
     // 二是 delegate 内每引用一次外层 id（如 root.xxx）qmllint 就多一条
     // Unqualified access，模型里带上像素值就能把告警压回基线。
@@ -857,7 +914,10 @@ PluginPage {
     }
 
     onBackendChanged: loadData()
-    Component.onCompleted: Qt.callLater(loadData)
+    Component.onCompleted: {
+        root.reloadUpdateState()
+        Qt.callLater(loadData)
+    }
 
     // ===== 主布局：左侧导航 + 右侧可滚动内容 =====
     RowLayout {
@@ -2800,6 +2860,71 @@ PluginPage {
                         ResultText { id: backupResultText }
                     }
                 }
+
+                // ---------- 备用更新服务（官方广场不可用时的兜底）----------
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_arrow_sync_20_regular"
+                    title: qsTr("备用更新服务")
+                    description: qsTr("官方插件广场不可用时，可改从备用地址检查新版本。留空则使用本插件的 GitHub Release 作为备用源")
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: qsTr("当前版本 %1").arg(root.updateState.current || "—")
+                                font.pixelSize: 12
+                                opacity: 0.7
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Button {
+                                text: root.updateState.status === "checking"
+                                      ? qsTr("检查中…") : qsTr("检查更新")
+                                enabled: root.updateState.status !== "checking"
+                                onClicked: root.checkUpdateNow()
+                            }
+
+                            Button {
+                                text: qsTr("前往下载")
+                                highlighted: true
+                                visible: root.updateState.status === "available"
+                                        || root.updateState.status === "latest"
+                                onClicked: root.openUpdateLink()
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.updateStatusText()
+                            font.pixelSize: 12
+                            wrapMode: Text.Wrap
+                            color: root.updateState.status === "available" ? "#2E7D32" : "#888888"
+                        }
+
+                        CheckBox {
+                            text: qsTr("每次启动时自动检查一次")
+                            checked: root.updateAuto
+                            onToggled: root.saveUpdateAuto(checked)
+                        }
+
+                        TextField {
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("备用更新地址（留空 = 内置 GitHub Release）")
+                            text: root.updateSource
+                            onEditingFinished: root.saveUpdateSource(text)
+                        }
+
+                        ResultText { id: updateResultText }
+                    }
+                }
+
             }
         }
     }
@@ -3131,5 +3256,6 @@ PluginPage {
     Connections {
         target: root.backend
         function onDutyChanged() { root.refreshTodayStats() }
+        function onUpdateReady() { root.reloadUpdateState() }
     }
 }

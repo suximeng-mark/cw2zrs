@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from bisect import bisect_right
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
@@ -79,7 +80,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "reminder_enabled": False,      # 每日值日提醒开关
     "reminder_time": REMINDER_DEFAULT_TIME,
     "reminder_skip_holiday": True,  # 假期不提醒
+    "update_auto": False,           # 插件启动时自动检查一次更新（默认关闭，避免每次启动都联网）
+    "update_source": "",            # 备用更新地址；留空 = 用内置的 GitHub Releases
 }
+
+# 备用更新服务：官方插件广场（plaza.cw.rinlit.cn）不可用时的兜底检查源。
+# 内置源是本插件自己的 GitHub Release —— 广场挂了也照样能发现有新版本。
+DEFAULT_UPDATE_SOURCE = "https://api.github.com/repos/suximeng-mark/cw2zrs/releases/latest"
+UPDATE_TIMEOUT_SEC = 8
+UPDATE_CHECK_DELAY_MS = 1500  # 进设置页后延迟多久自动检查（避开页面加载高峰）
 
 # 工作日轮换的周末处理方式：
 # merge=周六日整体计 1 档（默认） / skip=周末不轮换 / each=周六日逐日计档
@@ -125,8 +134,23 @@ DEFAULT_GROUPS_RAW = [
 ]
 
 
+def _read_plugin_version() -> str:
+    """插件当前版本：从 cwplugin.json 读，避免在代码里再抄一份而忘记同步。"""
+    try:
+        manifest = Path(__file__).resolve().parent / "cwplugin.json"
+        with open(manifest, "r", encoding="utf-8") as f:
+            version = str(json.load(f).get("version", "") or "").strip()
+        if version:
+            return version
+    except Exception as e:  # 读不到不致命：更新检查只是提示功能
+        logger.warning(f"[值日生] 读取 cwplugin.json 失败：{e}")
+    return "0.0.0"
+
+
+_PLUGIN_VERSION = _read_plugin_version()
+
+
 def _object_to_builtin(o: Any) -> Any:
-    """json.dumps 的 default 钩子：把 QML 传来的 QVariant 包装对象转成内建类型。"""
     if hasattr(o, "__dict__"):
         return vars(o)
     return str(o)
@@ -164,6 +188,7 @@ class DutyConfig(ConfigBaseModel):
 
 class Plugin(CW2Plugin):
     dutyChanged = Signal()
+    updateReady = Signal()
 
     def __init__(self, api: PluginAPI) -> None:
         super().__init__(api)
@@ -224,6 +249,15 @@ class Plugin(CW2Plugin):
         self._reminder_timer.setInterval(REMINDER_POLL_MS)
         self._reminder_timer.timeout.connect(self._check_reminder)
 
+        # 备用更新服务：网络请求放到后台线程，结果回来后再通过 updateReady 通知 UI
+        self._update_state: Dict[str, Any] = {
+            "status": "idle", "latest": "", "current": "",
+            "download": "", "page": "", "msg": "",
+        }
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self._auto_check_update)
+
     def on_load(self) -> None:
         super().on_load()
         if self.pid is None:
@@ -262,10 +296,13 @@ class Plugin(CW2Plugin):
         # 通知注册失败（旧版核心）不影响其余功能
         self._register_notifier()
         self._reminder_timer.start()
+        # 备用更新：启动后延迟检查一次（用户开了开关才会真的发请求）
+        self._update_timer.start(UPDATE_CHECK_DELAY_MS)
 
     def on_unload(self) -> None:
         # 每一步独立保护：任一环节失败都不能阻断其余落盘与基类卸载
         self._safe_shutdown(self._reminder_timer.stop)
+        self._safe_shutdown(self._update_timer.stop)
         if self._config_timer.isActive():
             self._config_timer.stop()
             self._safe_shutdown(self._flush_config)
@@ -392,6 +429,14 @@ class Plugin(CW2Plugin):
             out["reminder_enabled"] = raw["reminder_enabled"]
         if isinstance(raw.get("reminder_skip_holiday"), bool):
             out["reminder_skip_holiday"] = raw["reminder_skip_holiday"]
+        if isinstance(raw.get("update_auto"), bool):
+            out["update_auto"] = raw["update_auto"]
+        # 只接受 http/https，避免把任意本地路径当成更新源
+        src = str(raw.get("update_source", "") or "").strip()
+        if not src:
+            out["update_source"] = ""
+        elif src.lower().startswith(("http://", "https://")):
+            out["update_source"] = src
 
         time_str = str(raw.get("reminder_time", "") or "").strip()
         if REMINDER_TIME_RE.fullmatch(time_str):
@@ -1823,6 +1868,174 @@ class Plugin(CW2Plugin):
         except Exception as e:
             logger.error(f"[值日生] 测试提醒失败: {e}")
             return {"ok": False, "msg": str(e)}
+
+    # ------------------------------------------------- 备用更新服务
+    @staticmethod
+    def _version_key(version: str) -> tuple:
+        """把版本串解析成可比较的元组：'1.9.10' -> (1, 9, 10)。
+
+        必须按数字分段比较：字符串比较会把 '1.9.10' 判成小于 '1.9.9'。
+        非数字段（如 1.10.0-beta.2 的 beta）按 0 处理并排在正式版之后。
+        """
+        head, _, tail = str(version or "").strip().lstrip("vV").partition("-")
+        nums = []
+        for part in head.split("."):
+            try:
+                nums.append(int(part))
+            except ValueError:
+                break
+        # 有预发布后缀的版本视为「低于同号正式版」
+        return (tuple(nums) or (0,), 0 if tail else 1)
+
+    @classmethod
+    def _is_newer(cls, latest: str, current: str) -> bool:
+        a = cls._version_key(latest)
+        b = cls._version_key(current)
+        length = max(len(a[0]), len(b[0]))
+        pa = a[0] + (0,) * (length - len(a[0]))
+        pb = b[0] + (0,) * (length - len(b[0]))
+        return (pa, a[1]) > (pb, b[1])
+
+    @staticmethod
+    def _extract_update(payload: Any) -> tuple:
+        """从更新源响应里取出 (版本, 下载直链, 展示页)。
+
+        同时兼容两类响应：
+          - GitHub Release API：{tag_name, html_url, assets:[{browser_download_url}]}
+          - 通用 JSON：{version, download, page}
+        """
+        if not isinstance(payload, dict):
+            return "", "", ""
+        version = str(payload.get("tag_name") or payload.get("version") or "")
+        version = version.strip().lstrip("vV")
+        download = str(payload.get("download") or "")
+        page = str(payload.get("page") or payload.get("html_url") or "")
+        for asset in payload.get("assets") or []:
+            if not isinstance(asset, dict):
+                continue
+            url = str(asset.get("browser_download_url") or "")
+            if url.endswith(".cwplugin"):
+                download = url
+                break
+            if not download and url:
+                download = url
+        if not page and download:
+            page = download
+        return version, download, page
+
+    def _update_source_url(self) -> str:
+        """实际使用的更新源：用户填的备用地址优先，留空则用内置源。"""
+        return (self._settings.get("update_source") or "").strip() or DEFAULT_UPDATE_SOURCE
+
+    def _auto_check_update(self) -> None:
+        """启动后的延迟自动检查（只查一次，且用户开了开关才查）。"""
+        if self._settings.get("update_auto") and self._update_state["status"] != "checking":
+            self.check_update()
+
+    @Slot(result=bool)
+    def check_update(self) -> bool:
+        """检查备用更新源；请求放到后台线程，绝不阻塞 UI。"""
+        if self._update_state["status"] == "checking":
+            return False
+        url = self._update_source_url()
+        self._update_state = {
+            "status": "checking", "latest": "", "current": self.current_version(),
+            "download": "", "page": "", "msg": "",
+        }
+        threading.Thread(
+            target=self._fetch_update, args=(url,), daemon=True
+        ).start()
+        return True
+
+    def _fetch_update(self, url: str) -> None:
+        """后台线程：拉取更新源。结果写回 _update_state，再发信号让 UI 读取。"""
+        import urllib.error
+        import urllib.request
+
+        state = {
+            "status": "error", "latest": "", "current": self.current_version(),
+            "download": "", "page": "",
+            "msg": f"无法访问更新源：{url}",
+        }
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "cw2-duty-plugin",
+                    "Accept": "application/vnd.github+json",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT_SEC) as resp:
+                raw = resp.read(512_000)  # 限流：更新源不该返回巨大的包
+            latest, download, page = self._extract_update(json.loads(raw.decode("utf-8")))
+            if not latest:
+                state["msg"] = "更新源没有返回可识别的版本号"
+            elif self._is_newer(latest, state["current"]):
+                state.update({
+                    "status": "available", "latest": latest,
+                    "download": download, "page": page, "msg": "",
+                })
+            else:
+                state.update({
+                    "status": "latest", "latest": latest,
+                    "page": page, "msg": "",
+                })
+        except urllib.error.HTTPError as e:
+            state["msg"] = f"更新源返回 HTTP {e.code}"
+        except (urllib.error.URLError, TimeoutError) as e:
+            reason = getattr(e, "reason", e)
+            state["msg"] = f"更新源连接失败：{reason}"
+        except (ValueError, OSError) as e:
+            state["msg"] = f"更新源响应无法解析：{e}"
+        except Exception as e:  # 兜底：网络栈可能抛出任何东西
+            logger.warning(f"[值日生] 检查更新异常：{e}")
+            state["msg"] = f"检查更新失败：{e}"
+        self._update_state = state
+        QTimer.singleShot(0, self.updateReady.emit)
+
+    @Slot(result="QVariant")
+    def get_update_state(self) -> Dict[str, Any]:
+        """当前更新状态；界面只读，不再发请求。"""
+        s = dict(self._update_state)
+        s["source"] = self._update_source_url()
+        s["auto"] = bool(self._settings.get("update_auto"))
+        s["builtin"] = (self._settings.get("update_source") or "").strip() == ""
+        return s
+
+    @Slot(result=bool)
+    def open_update_link(self) -> bool:
+        """用系统默认浏览器打开下载/详情页。"""
+        link = self._update_state.get("download") or self._update_state.get("page")
+        if not link:
+            return False
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+
+            ok = QDesktopServices.openUrl(QUrl(link))
+            logger.info(f"[值日生] 打开更新链接：{link}（{ok}）")
+            return bool(ok)
+        except Exception as e:
+            logger.error(f"[值日生] 打开更新链接失败: {e}")
+            return False
+
+    @Slot(bool, str, result=bool)
+    def save_update_settings(self, auto: bool, source: str) -> bool:
+        """保存备用更新设置；source 非法（非 http/https）时拒绝。"""
+        raw = dict(self._settings)
+        raw["update_auto"] = bool(auto)
+        raw["update_source"] = str(source or "").strip()
+        self._settings = self._normalize_settings(raw, base=self._settings)
+        self._schedule_config_flush()
+        logger.info(
+            f"[值日生] 更新设置已保存：自动={self._settings['update_auto']}, "
+            f"备用源={self._settings['update_source'] or '（内置）'}"
+        )
+        return True
+
+    @Slot(result=str)
+    def current_version(self) -> str:
+        return _PLUGIN_VERSION
 
     # -------------------------------------------------------- import/export
     @Slot(str, result="QVariant")
