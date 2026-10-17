@@ -55,6 +55,7 @@ def make_plugin(settings=None):
         "download": "", "page": "", "msg": "",
     }
     p.updateReady = types.SimpleNamespace(emit=lambda: None)
+    p._update_cancelled = __import__("threading").Event()
     p._schedule_config_flush = lambda: None   # 测试里不写盘
     return p
 

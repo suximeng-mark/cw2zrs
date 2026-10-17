@@ -15,3 +15,5 @@ build/
 RinUI/
 .trae/
 fix_cw_config.py
+# 插件运行时私有数据（分组/假期/历史），随插件目录分发，不进版本库
+data/

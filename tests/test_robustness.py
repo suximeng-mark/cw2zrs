@@ -79,6 +79,8 @@ def make_plugin(groups=None, start: str = "2020-01-01", mode: str = m.MODE_DAILY
     p._task_swaps = {}
     p._settings = dict(m.DEFAULT_SETTINGS)
     p._history = []
+    p._profiles = [{"id": "p0", "name": "默认方案"}]
+    p._active_profile_id = "p0"
     p._history_path = ROOT / "data" / "history.json"
     p._notifier = None
     p._reminder_fired_date = ""
@@ -118,6 +120,13 @@ def test_no_exception() -> None:
         ("save_holidays", lambda p, v: m.Plugin.save_holidays(p, v)),
         ("save_all(mode)", lambda p, v: m.Plugin.save_all(p, "2020-01-01", v, [])),
         ("save_all(groups)", lambda p, v: m.Plugin.save_all(p, "2020-01-01", "daily", v)),
+        ("switch_profile", lambda p, v: m.Plugin.switch_profile(p, v)),
+        ("add_profile(name)", lambda p, v: m.Plugin.add_profile(p, v, True)),
+        ("add_profile(copy)", lambda p, v: m.Plugin.add_profile(p, "名", v)),
+        ("rename_profile(pid)", lambda p, v: m.Plugin.rename_profile(p, v, "名")),
+        ("rename_profile(name)", lambda p, v: m.Plugin.rename_profile(p, "p0", v)),
+        ("delete_profile", lambda p, v: m.Plugin.delete_profile(p, v)),
+        ("get_history_month", lambda p, v: m.Plugin.get_history_month(p, v)),
     ]
     for name, fn in cases:
         for v in DIRTY:

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+import uuid
 from bisect import bisect_right
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
@@ -113,6 +114,9 @@ MERGE_PAIRS_LIMIT = 200
 # _units_to 的记忆化容量（按轮换指纹 + 日期缓存原始档数）
 UNITS_MEMO_LIMIT = 512
 
+# 多套值日方案：旧版平铺配置迁移时使用的默认方案名
+DEFAULT_PROFILE_NAME = "默认方案"
+
 # 首次安装时的内置示例分组
 DEFAULT_GROUPS_RAW = [
     {
@@ -216,6 +220,10 @@ class Plugin(CW2Plugin):
         # 两者任一变化（轮到下一组/下一轮、手动切组、临时调班）即自动失效
         self._task_swaps: Dict[str, Any] = {}
         self._settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
+        # 多套值日方案：_profiles 存全部方案 dict（轮换域字段），active 指向当前；
+        # 活动方案的运行时真身在 _groups/_rotation_mode 等字段，flush 时写回条目
+        self._profiles: List[Dict[str, Any]] = []
+        self._active_profile_id: str = ""
         plugin_dir = Path(__file__).resolve().parent
         self._data_dir = plugin_dir / "data"
         self._config_file = self._data_dir / "config.json"
@@ -254,6 +262,8 @@ class Plugin(CW2Plugin):
             "status": "idle", "latest": "", "current": "",
             "download": "", "page": "", "msg": "",
         }
+        # 卸载时置位：后台线程回来后发现已卸载就不再往（可能已销毁的）QObject 发信号
+        self._update_cancelled = threading.Event()
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
         self._update_timer.timeout.connect(self._auto_check_update)
@@ -267,6 +277,8 @@ class Plugin(CW2Plugin):
         # 覆盖内存中该插件的整个配置段，旧数据必须先搬进私有文件。
         had_legacy_history = self._migrate_legacy_history(self.pid)
         had_legacy_config = self._migrate_plugin_config(self.pid)
+        # 旧版本历史记录没有 profile 标签：统一挂到当前（首个）方案名下
+        self._tag_untagged_history()
 
         # 注册零字段空模型：register_plugin_model 绑定回调后会立即执行一次
         # 同步，把 RootConfig 内存里的本插件配置段替换为 {}；核心下次落盘时
@@ -302,6 +314,7 @@ class Plugin(CW2Plugin):
     def on_unload(self) -> None:
         # 每一步独立保护：任一环节失败都不能阻断其余落盘与基类卸载
         self._safe_shutdown(self._reminder_timer.stop)
+        self._update_cancelled.set()   # 别让在途的后台线程再回调已销毁的对象
         self._safe_shutdown(self._update_timer.stop)
         if self._config_timer.isActive():
             self._config_timer.stop()
@@ -480,11 +493,69 @@ class Plugin(CW2Plugin):
             self._manual_offset = 0
 
         self._holidays = self._parse_holidays(data.get("holidays", []))
-        self._settings = self._normalize_settings(data.get("settings", {}))
+        # settings 仅在显式携带时应用：方案装载传入的方案 dict 不含 settings，
+        # 切换方案不影响全局显示/提醒/更新设置
+        if "settings" in data:
+            self._settings = self._normalize_settings(data.get("settings", {}))
         self._temp_swaps = self._parse_temp_swaps(data.get("temp_swaps"))
         self._task_swaps = self._parse_task_swaps(data.get("task_swaps"))
         self._slots_cache.clear()
         self._invalidate_holiday_cache()
+
+    # -------------------------------------------------------- duty profiles
+    @staticmethod
+    def _new_profile_id() -> str:
+        return uuid.uuid4().hex[:12]
+
+    def _parse_profiles(self, raw: Any) -> List[Dict[str, Any]]:
+        """归一化方案列表；只保证 id 唯一、name 非空，轮换字段留给 _apply_config 校验。
+
+        id 冲突/缺失时重新生成；settings 键丢弃（全局配置不入方案）。
+        返回空列表表示没有可用方案，调用方负责兜底成单方案。
+        """
+        profiles: List[Dict[str, Any]] = []
+        seen: set = set()
+        for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("id", "") or "")
+            if not pid or pid in seen:
+                pid = self._new_profile_id()
+            seen.add(pid)
+            entry = {k: v for k, v in item.items() if k != "settings"}
+            entry["id"] = pid
+            name = str(item.get("name", "") or "").strip()
+            entry["name"] = name[:30] if name else DEFAULT_PROFILE_NAME
+            profiles.append(entry)
+        return profiles
+
+    def _apply_storage(self, data: Dict[str, Any]) -> None:
+        """把私有配置 payload 应用到内存（新多方案格式 / 旧平铺格式二选一）。
+
+        新格式：装载活动方案，settings 顶层归一化保持全局。
+        旧平铺：包装成单个「默认方案」，行为与 1.12 及之前完全一致。
+        """
+        data = data if isinstance(data, dict) else {}
+        profiles = self._parse_profiles(data.get("profiles"))
+        if profiles:
+            active = str(data.get("active", "") or "")
+            if not any(p["id"] == active for p in profiles):
+                active = profiles[0]["id"]
+            if "settings" in data:
+                self._settings = self._normalize_settings(
+                    data.get("settings", {}), base=self._settings
+                )
+            self._profiles = profiles
+            self._active_profile_id = active
+            target = next(p for p in profiles if p["id"] == active)
+            self._apply_config(dict(target))
+            return
+
+        # 旧平铺格式：包装成单方案（含 settings 时照常应用）
+        pid = self._new_profile_id()
+        self._profiles = [{"id": pid, "name": DEFAULT_PROFILE_NAME}]
+        self._active_profile_id = pid
+        self._apply_config(data)
 
     @staticmethod
     def _coerce_index(value: Any) -> Optional[int]:
@@ -629,11 +700,29 @@ class Plugin(CW2Plugin):
             "tasks": {str(i): t for i, t in s.get("tasks", {}).items()},
         }
 
+    def _sync_active_profile(self) -> None:
+        """把当前运行时轮换状态写回 _profiles 中活动方案的条目（纯内存）。"""
+        cur = self._build_config_payload()
+        cur.pop("settings", None)
+        for p in self._profiles:
+            if p.get("id") == self._active_profile_id:
+                p.update(cur)
+                return
+
+    def _build_storage_payload(self) -> Dict[str, Any]:
+        """data/config.json 的完整内容：{active, profiles, settings}。"""
+        self._sync_active_profile()
+        return {
+            "active": self._active_profile_id,
+            "profiles": [dict(p) for p in self._profiles],
+            "settings": dict(self._settings),
+        }
+
     def _flush_config(self) -> None:
         """把全部插件配置写入私有文件 data/config.json（原子替换，文件很小）。"""
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
-            payload = self._build_config_payload()
+            payload = self._build_storage_payload()
             tmp_path = self._config_file.with_name(self._config_file.name + ".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -657,7 +746,7 @@ class Plugin(CW2Plugin):
         file_payload = self._load_config_file()
         if file_payload is not None:
             # 私有文件为权威数据源；configs.json 里的残留段仅待核心保存时清空
-            self._apply_config(file_payload)
+            self._apply_storage(file_payload)
             return legacy_present
 
         if legacy_present:
@@ -671,7 +760,7 @@ class Plugin(CW2Plugin):
             logger.info("[值日生] 检测到 configs.json 中的旧配置，迁移到插件私有文件")
         else:
             payload = {"groups": DEFAULT_GROUPS_RAW}
-        self._apply_config(payload)
+        self._apply_storage(payload)
         self._flush_config()
         return legacy_present
 
@@ -1237,7 +1326,7 @@ class Plugin(CW2Plugin):
         )
 
     @staticmethod
-    def _sanitize_record(item: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize_record(item: Dict[str, Any], profile: str = "") -> Dict[str, Any]:
         members: List[Dict[str, str]] = []
         for m in item.get("members", []):
             if not isinstance(m, dict):
@@ -1255,6 +1344,7 @@ class Plugin(CW2Plugin):
             "group_name": str(item.get("group_name", "") or ""),
             "auto_group_name": str(item.get("auto_group_name", "") or ""),
             "members": members,
+            "profile": str(profile or ""),
         }
 
     def _load_history_file(self) -> List[Dict[str, Any]]:
@@ -1318,6 +1408,20 @@ class Plugin(CW2Plugin):
         self._flush_history()
         return True
 
+    def _tag_untagged_history(self) -> bool:
+        """给没有 profile 标签的历史记录补上当前方案 id；返回是否有变更。"""
+        if not self._history:
+            return False
+        active = getattr(self, "_active_profile_id", "")
+        changed = False
+        for r in self._history:
+            if not r.get("profile"):
+                r["profile"] = active
+                changed = True
+        if changed:
+            self._schedule_history_flush()
+        return changed
+
     def _ensure_today_record(
         self, today: date, auto_idx: int, group: DutyGroup
     ) -> Dict[str, Any]:
@@ -1327,7 +1431,13 @@ class Plugin(CW2Plugin):
         不触碰注册模型、不写 configs.json、不触发 configChanged。
         """
         iso = today.isoformat()
-        record = next((r for r in self._history if r["date"] == iso), None)
+        # 历史按方案隔离：同一天允许每个方案各有一条记录，按 (date, profile) 命中
+        active = getattr(self, "_active_profile_id", "")
+        record = next(
+            (r for r in self._history
+             if r["date"] == iso and r.get("profile", "") == active),
+            None,
+        )
         auto_name = (
             self._groups[auto_idx].name if self._groups else ""
         )
@@ -1341,6 +1451,7 @@ class Plugin(CW2Plugin):
                     {"name": m.name, "task": m.task, "status": STATUS_NORMAL}
                     for m in group.members
                 ],
+                "profile": active,
             }
             self._history.append(record)
             self._trim_history()
@@ -1633,7 +1744,13 @@ class Plugin(CW2Plugin):
     def set_member_status(self, day: str, member_index: int, status: str) -> bool:
         if status not in (STATUS_NORMAL, STATUS_ABSENT):
             return False
-        record = next((r for r in self._history if r["date"] == day), None)
+        # 历史按方案隔离：按 (date, profile) 命中当前方案的当日记录
+        active = getattr(self, "_active_profile_id", "")
+        record = next(
+            (r for r in self._history
+             if r["date"] == day and r.get("profile", "") == active),
+            None,
+        )
         if record is None or not (0 <= member_index < len(record["members"])):
             return False
         record["members"][member_index]["status"] = status
@@ -1646,11 +1763,20 @@ class Plugin(CW2Plugin):
         self._emit_duty_changed()
         return True
 
+    def _records_for_active(self) -> List[Dict[str, Any]]:
+        """当前方案的考勤记录（历史按方案隔离，旧记录 profile 为 ""）。
+
+        getattr 兜底：测试桩可能用 object.__new__ 构造实例而没有
+        _active_profile_id 属性，此时 profile 为空的记录视为当前方案。
+        """
+        active = getattr(self, "_active_profile_id", "")
+        return [r for r in self._history if r.get("profile", "") == active]
+
     @Slot(result="QVariant")
     def get_stats(self) -> Dict[str, Any]:
         per_person: Dict[str, Dict[str, Any]] = {}
 
-        records = sorted(self._history, key=lambda r: r["date"])
+        records = sorted(self._records_for_active(), key=lambda r: r["date"])
         # 按人统计必须遍历全部记录；但「最近记录」只取末 15 条，
         # 所以成员明细只为这 15 条构建——旧实现给每条记录都建一份，
         # 400 天 × 数名成员里 96% 的字典刚建完就被丢掉。
@@ -1737,11 +1863,152 @@ class Plugin(CW2Plugin):
 
     @Slot()
     def clear_history(self) -> None:
-        self._history = []
+        # 多方案下只清当前方案的记录，其他方案的历史不受影响
+        active = getattr(self, "_active_profile_id", "")
+        self._history = [
+            r for r in self._history if r.get("profile", "") != active
+        ]
         self._history_timer.stop()
         self._flush_history()
         logger.info("[值日生] 历史记录已清空")
         self._emit_duty_changed()
+
+    # -------------------------------------------------------- duty profiles
+    @Slot(result="QVariant")
+    def get_profiles(self) -> Dict[str, Any]:
+        return {
+            "active": self._active_profile_id,
+            "items": [
+                {"id": p.get("id", ""), "name": p.get("name", "")}
+                for p in self._profiles
+            ],
+        }
+
+    @Slot(str, result=bool)
+    def switch_profile(self, pid: str) -> bool:
+        """切换值日方案：当前运行时写回原方案条目，再装载目标方案。
+
+        _apply_config 内部统一失效 _slots_cache 与假期/合并缓存；
+        _units_memo / _merge_* 的 key 含轮换指纹，配置变化自动失效。
+        """
+        pid = str(pid or "")
+        if not any(p.get("id") == pid for p in self._profiles):
+            return False
+        if pid == self._active_profile_id:
+            return True
+        self._sync_active_profile()
+        self._active_profile_id = pid
+        target = next(p for p in self._profiles if p.get("id") == pid)
+        self._apply_config(dict(target))
+        logger.info(f"[值日生] 已切换值日方案：{target.get('name', '')}")
+        self._schedule_config_flush()
+        self._emit_duty_changed()
+        return True
+
+    @Slot(str, bool, result=str)
+    def add_profile(self, name: str, copy_current: bool) -> str:
+        """新增方案（默认复制当前方案的组员/轮换/假期），返回新方案 id。"""
+        if copy_current:
+            base = self._build_config_payload()
+            base.pop("settings", None)
+        else:
+            base = {
+                "groups": [dict(g) for g in DEFAULT_GROUPS_RAW],
+                "start_date": DEFAULT_START_DATE,
+                "rotation_mode": MODE_WEEKLY,
+            }
+        pid = self._new_profile_id()
+        clean = str(name or "").strip()[:30] or f"方案{len(self._profiles) + 1}"
+        entry: Dict[str, Any] = {"id": pid, "name": clean}
+        entry.update(base)
+        self._profiles.append(entry)
+        logger.info(f"[值日生] 新增值日方案：{clean}")
+        self.switch_profile(pid)
+        return pid
+
+    @Slot(str, str, result=bool)
+    def rename_profile(self, pid: str, name: str) -> bool:
+        pid = str(pid or "")
+        clean = str(name or "").strip()[:30]
+        if not clean:
+            return False
+        for p in self._profiles:
+            if p.get("id") == pid:
+                p["name"] = clean
+                self._schedule_config_flush()
+                logger.info(f"[值日生] 方案已重命名为：{clean}")
+                return True
+        return False
+
+    @Slot(str, result=bool)
+    def delete_profile(self, pid: str) -> bool:
+        """删除方案（最后一个不可删），其考勤历史一并删除，不可恢复。"""
+        pid = str(pid or "")
+        if len(self._profiles) <= 1:
+            return False
+        idx = next(
+            (i for i, p in enumerate(self._profiles) if p.get("id") == pid), -1
+        )
+        if idx < 0:
+            return False
+        removed = self._profiles.pop(idx)
+        # 连带删除该方案的考勤历史（历史按方案隔离）
+        self._history = [
+            r for r in self._history if r.get("profile", "") != pid
+        ]
+        logger.info(f"[值日生] 已删除值日方案：{removed.get('name', '')}")
+        if self._active_profile_id == pid and self._profiles:
+            first = self._profiles[0]
+            self._active_profile_id = first.get("id", "")
+            self._apply_config(dict(first))
+        self._schedule_config_flush()
+        self._schedule_history_flush()
+        self._emit_duty_changed()
+        return True
+
+    # ------------------------------------------------------- history browse
+    @Slot(result="QVariant")
+    def get_history_overview(self) -> Dict[str, Any]:
+        """历史浏览页的概览：可用月份、出现过的成员（限当前方案）。"""
+        records = self._records_for_active()
+        months: set = set()
+        for r in records:
+            try:
+                months.add(date.fromisoformat(str(r.get("date", ""))).strftime("%Y-%m"))
+            except ValueError:
+                continue  # 脏日期不进月份列表
+        names = sorted({
+            m.get("name", "") for r in records for m in r.get("members", [])
+            if m.get("name")
+        })
+        return {"months": sorted(months), "members": names, "total": len(records)}
+
+    @Slot(str, result="QVariant")
+    def get_history_month(self, month: str) -> Dict[str, Any]:
+        """某月（YYYY-MM）的历史记录，按日期升序；结构对齐 get_stats 的 recent。"""
+        month = str(month or "").strip()
+        if not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", month):
+            return {"records": []}
+        picked = sorted(
+            (r for r in self._records_for_active()
+             if str(r.get("date", "")).startswith(month)),
+            key=lambda r: r["date"],
+        )
+        return {"records": [
+            {
+                "date": r["date"],
+                "groupName": r["group_name"],
+                "switched": (
+                    bool(r["auto_group_name"])
+                    and r["group_name"] != r["auto_group_name"]
+                ),
+                "members": [
+                    {"name": m["name"], "task": m["task"], "status": m["status"]}
+                    for m in r["members"]
+                ],
+            }
+            for r in picked
+        ]}
 
     # ------------------------------------------------------------ reminder
     def _register_notifier(self) -> None:
@@ -1938,6 +2205,7 @@ class Plugin(CW2Plugin):
         if self._update_state["status"] == "checking":
             return False
         url = self._update_source_url()
+        self._update_cancelled.clear()
         self._update_state = {
             "status": "checking", "latest": "", "current": self.current_version(),
             "download": "", "page": "", "msg": "",
@@ -1991,7 +2259,16 @@ class Plugin(CW2Plugin):
             logger.warning(f"[值日生] 检查更新异常：{e}")
             state["msg"] = f"检查更新失败：{e}"
         self._update_state = state
-        QTimer.singleShot(0, self.updateReady.emit)
+        # 必须在持有 self 的前提下先看取消标志：线程回来时插件可能已卸载，
+        # 那时 self 对应的 C++ QObject 已销毁，emit 会直接崩掉整个宿主。
+        if self._update_cancelled.is_set():
+            logger.info("[值日生] 插件已卸载，丢弃本次更新检查结果")
+            return
+        # 直接 emit，而不是 QTimer.singleShot(0, ...)：
+        # 后者在没有事件循环的线程里调用**永远不会触发**（已实测），
+        # 结果就是界面永远停在「检查中…」。QObject 信号从工作线程发出时，
+        # Qt 会按 AutoConnection 自动排队投递回主线程。
+        self.updateReady.emit()
 
     @Slot(result="QVariant")
     def get_update_state(self) -> Dict[str, Any]:
@@ -2035,6 +2312,9 @@ class Plugin(CW2Plugin):
 
     @Slot(result=str)
     def current_version(self) -> str:
+        # 启动时已从 cwplugin.json 读过一次，这里直接返回常量：
+        # 避免每次检查都在（可能是后台线程里）重复读磁盘，
+        # 也确保它永远不会抛异常把状态机卡在 checking。
         return _PLUGIN_VERSION
 
     # -------------------------------------------------------- import/export
@@ -2128,6 +2408,13 @@ class Plugin(CW2Plugin):
             if include_display:
                 sections["display"] = dict(self._settings)
             if include_people:
+                # 2.0.0 起人员设置是「一整套值日方案」，必须整份备份；
+                # 只存活动方案的话，恢复后其余方案会连同人员一起丢失。
+                self._sync_active_profile()
+                sections["profiles"] = {
+                    "active": self._active_profile_id,
+                    "items": [dict(p) for p in self._profiles],
+                }
                 sections["groups"] = self._groups_payload()
             if include_rotation:
                 sections["rotation"] = {
@@ -2196,8 +2483,23 @@ class Plugin(CW2Plugin):
                 applied.append("界面设置")
 
             if include_people and isinstance(sections.get("groups"), list):
-                self._groups = self._parse_groups(sections["groups"])
-                applied.append(f"人员设置（{len(self._groups)} 组）")
+                # 2.0.0 的备份带整份方案列表：有就整份恢复（活动方案的成员
+                # 已经在方案条目里，不必再单独套用），没有则退回旧的单方案行为。
+                raw_profiles = sections.get("profiles")
+                items = raw_profiles.get("items") if isinstance(raw_profiles, dict) else None
+                profiles = self._parse_profiles(items)
+                if profiles:
+                    active = str(raw_profiles.get("active", "") or "")
+                    if not any(p["id"] == active for p in profiles):
+                        active = profiles[0]["id"]
+                    self._profiles = profiles
+                    self._active_profile_id = active
+                    target = next(p for p in profiles if p["id"] == active)
+                    self._apply_config(dict(target))
+                    applied.append(f"值日方案（{len(profiles)} 套）")
+                else:
+                    self._groups = self._parse_groups(sections["groups"])
+                    applied.append(f"人员设置（{len(self._groups)} 组）")
 
             rot = sections.get("rotation")
             if include_rotation and isinstance(rot, dict):
@@ -2219,14 +2521,21 @@ class Plugin(CW2Plugin):
                 applied.append("轮换配置及方式")
 
             if include_history and isinstance(sections.get("history"), list):
-                self._history = [
-                    self._sanitize_record(r)
+                imported = [
+                    # 无 profile 标签的旧备份记录挂到当前方案名下
+                    self._sanitize_record(r, profile=getattr(self, "_active_profile_id", ""))
                     for r in sections["history"]
                     if self._is_valid_record(r)
                 ]
+                # 只替换当前方案的记录，其他方案的历史保留
+                active = getattr(self, "_active_profile_id", "")
+                kept = [
+                    r for r in self._history if r.get("profile", "") != active
+                ]
+                self._history = kept + imported
                 self._trim_history()
                 self._flush_history()
-                applied.append(f"请假记录（{len(self._history)} 天）")
+                applied.append(f"请假记录（{len(imported)} 天）")
 
             if not applied:
                 return {"ok": False, "msg": "备份中没有可导入的所选内容"}

@@ -22,6 +22,18 @@ PluginPage {
     property var todayData: null
     property var statsData: {"days": 0, "rows": [], "recent": [], "byWeek": [], "byGroup": []}
 
+    // 多套值日方案
+    property var profilesData: { "active": "", "items": [] }
+    property string newProfileName: ""
+    property bool copyCurrentProfile: true
+    property string renameText: ""
+
+    // 历史记录浏览
+    property var historyOverview: { "months": [], "members": [], "total": 0 }
+    property string historyMonth: ""
+    property var historyRecords: []
+    property string historyMember: ""
+
     property var updateState: {"status": "idle", "latest": "", "current": "",
                                "download": "", "page": "", "msg": ""}
     property bool updateAuto: false
@@ -182,6 +194,7 @@ PluginPage {
         { title: qsTr("轮换管理"), icon: "ic_fluent_arrow_sync_20_regular" },
         { title: qsTr("临时调整"), icon: "ic_fluent_people_swap_20_regular" },
         { title: qsTr("请假管理"), icon: "ic_fluent_person_prohibited_20_regular" },
+        { title: qsTr("历史记录"), icon: "ic_fluent_history_20_regular" },
         { title: qsTr("实验性功能"), icon: "ic_fluent_alert_20_regular" },
         { title: qsTr("备份 / 迁移"), icon: "ic_fluent_arrow_import_20_regular" }
     ]
@@ -324,6 +337,8 @@ PluginPage {
         var now = new Date()
         root.loadMonth(now.getFullYear(), now.getMonth() + 1)
         root.refreshTodayStats()
+        root.loadProfiles()
+        root.loadHistoryData()
         root.bumpEdit()
     }
 
@@ -820,6 +835,149 @@ PluginPage {
         }
         return names.join("、")
     }
+
+    // ===== 多套值日方案 =====
+    function loadProfiles() {
+        if (!root.backend) return
+        root.profilesData = root.clone(root.backend.get_profiles())
+        var cur = root.activeProfile()
+        root.renameText = cur ? (cur.name || "") : ""
+    }
+
+    function activeProfile() {
+        var items = root.profilesData.items || []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].id === root.profilesData.active) return items[i]
+        }
+        return items.length > 0 ? items[0] : null
+    }
+
+    function profileIndex() {
+        var items = root.profilesData.items || []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].id === root.profilesData.active) return i
+        }
+        return 0
+    }
+
+    function profileNames() {
+        var names = []
+        var items = root.profilesData.items || []
+        for (var i = 0; i < items.length; i++) names.push(items[i].name)
+        return names
+    }
+
+    function otherProfileNames() {
+        var names = []
+        var items = root.profilesData.items || []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].id !== root.profilesData.active) names.push(items[i].name)
+        }
+        return names
+    }
+
+    function otherProfileId(i) {
+        var items = root.profilesData.items || []
+        var arr = []
+        for (var k = 0; k < items.length; k++) {
+            if (items[k].id !== root.profilesData.active) arr.push(items[k].id)
+        }
+        return arr[i] || ""
+    }
+
+    function switchProfile(pid) {
+        if (!root.backend || !pid || pid === root.profilesData.active) return
+        if (root.backend.switch_profile(pid)) root.loadData()
+    }
+
+    function addProfile() {
+        if (!root.backend) return
+        var id = root.backend.add_profile(root.newProfileName, root.copyCurrentProfile)
+        if (id) {
+            root.newProfileName = ""
+            newProfileField.text = ""
+            root.loadData()
+        }
+    }
+
+    function renameCurrentProfile() {
+        if (!root.backend) return
+        if (root.backend.rename_profile(root.profilesData.active, root.renameText))
+            root.loadData()
+    }
+
+    function deleteOtherProfile(i) {
+        if (!root.backend) return
+        if (root.backend.delete_profile(root.otherProfileId(i))) root.loadData()
+    }
+
+    // ===== 历史记录浏览 =====
+    function loadHistoryData() {
+        if (!root.backend) return
+        root.historyOverview = root.clone(root.backend.get_history_overview())
+        var months = root.historyOverview.months || []
+        if (months.indexOf(root.historyMonth) < 0)
+            root.historyMonth = months.length > 0 ? months[months.length - 1] : ""
+        root.historyRecords = root.historyMonth
+            ? root.clone(root.backend.get_history_month(root.historyMonth)).records
+            : []
+        // 成员筛选目标可能已不存在（清记录/换方案），回退全部成员
+        if ((root.historyMember || "") !== ""
+                && (root.historyOverview.members || []).indexOf(root.historyMember) < 0)
+            root.historyMember = ""
+    }
+
+    function jumpHistoryMonth(index) {
+        var months = root.historyOverview.months || []
+        root.historyMonth = months[index] || ""
+        root.historyRecords = root.historyMonth
+            ? root.clone(root.backend.get_history_month(root.historyMonth)).records
+            : []
+    }
+
+    function shiftHistoryMonth(delta) {
+        var months = root.historyOverview.months || []
+        if (months.length === 0) return
+        var i = months.indexOf(root.historyMonth)
+        i = Math.max(0, Math.min(months.length - 1, (i < 0 ? 0 : i) + delta))
+        root.jumpHistoryMonth(i)
+    }
+
+    function setHistoryMember(index) {
+        var members = root.historyOverview.members || []
+        root.historyMember = index > 0 ? (members[index - 1] || "") : ""
+    }
+
+    function historyMonthTitle() {
+        if (root.historyMonth === "") return qsTr("暂无记录")
+        var p = root.historyMonth.split("-")
+        return qsTr("%1 年 %2 月").arg(parseInt(p[0], 10) || 0).arg(parseInt(p[1], 10) || 0)
+    }
+
+    function weekdayLabel(iso) {
+        var p = String(iso || "").split("-")
+        if (p.length !== 3) return ""
+        // 手动拆年月日构造 Date，避免 new Date(iso) 按 UTC 解析产生时区偏移
+        var d = new Date(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10))
+        return qsTr("周") + "日一二三四五六".charAt(d.getDay())
+    }
+
+    function filterHistoryRecords() {
+        var member = root.historyMember || ""
+        if (member === "") return root.historyRecords
+        var out = []
+        for (var i = 0; i < root.historyRecords.length; i++) {
+            var ms = root.historyRecords[i].members || []
+            for (var j = 0; j < ms.length; j++) {
+                if (ms[j].name === member) { out.push(root.historyRecords[i]); break }
+            }
+        }
+        return out
+    }
+
+    // 注意：本属性必须声明在 filterHistoryRecords() 之后（QML 按声明顺序求值绑定）
+    property var visibleHistory: root.filterHistoryRecords()
+    property string visibleHistoryTitle: root.historyMonthTitle()
 
     // ===== 界面预览（模拟部件普通模式）=====
     function previewPeriod() {
@@ -1505,12 +1663,111 @@ PluginPage {
             }
 
             // =====================================================
-            // 页面 2：轮换管理（轮换配置 + 起始日 + 月历 + 预览 + 导出）
+            // 页面 2：轮换管理（方案 + 轮换配置 + 起始日 + 月历 + 预览 + 导出）
             // =====================================================
             ColumnLayout {
                 visible: root.currentPage === 2
                 spacing: 12
                 Layout.fillWidth: true
+
+                // ---------- 值日方案 ----------
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_people_sync_20_regular"
+                    title: qsTr("值日方案")
+                    description: qsTr("每套方案独立保存分组、轮换、假期与考勤历史；界面显示与提醒为全局共用")
+
+                    ComboBox {
+                        Layout.preferredWidth: 200
+                        enabled: !!root.backend
+                        model: root.profileNames()
+                        currentIndex: root.profileIndex()
+                        onActivated: root.switchProfile(root.profilesData.items[index].id)
+                    }
+                }
+
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_add_20_regular"
+                    title: qsTr("新建方案")
+                    description: qsTr("复制当前方案的分组与轮换设置，或从内置示例分组开始")
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        TextField {
+                            id: newProfileField
+                            Layout.fillWidth: true
+                            placeholderText: qsTr("新方案名称，如：双周方案")
+                            onTextEdited: root.newProfileName = text
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            CheckBox {
+                                text: qsTr("复制当前方案设置")
+                                checked: root.copyCurrentProfile
+                                onToggled: root.copyCurrentProfile = checked
+                            }
+                            Item { Layout.fillWidth: true }
+                            Button {
+                                text: qsTr("新建")
+                                highlighted: true
+                                enabled: !!root.backend
+                                onClicked: root.addProfile()
+                            }
+                        }
+                    }
+                }
+
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_rename_20_regular"
+                    title: qsTr("重命名当前方案")
+                    description: qsTr("修改上方下拉框中选中方案的名称")
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        TextField {
+                            Layout.fillWidth: true
+                            text: root.renameText
+                            placeholderText: qsTr("方案名称")
+                            onTextEdited: root.renameText = text
+                        }
+                        Button {
+                            text: qsTr("重命名")
+                            enabled: !!root.backend && root.renameText.trim() !== ""
+                            onClicked: root.renameCurrentProfile()
+                        }
+                    }
+                }
+
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_delete_20_regular"
+                    title: qsTr("删除方案")
+                    description: qsTr("最后一个方案不可删除；被删方案的考勤历史将一并删除，不可恢复")
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        ComboBox {
+                            id: deleteProfileCombo
+                            Layout.preferredWidth: 200
+                            model: root.otherProfileNames()
+                        }
+                        Button {
+                            text: qsTr("删除所选方案")
+                            enabled: !!root.backend && root.otherProfileNames().length > 0
+                            onClicked: root.deleteOtherProfile(deleteProfileCombo.currentIndex)
+                        }
+                    }
+                }
 
                 SettingCard {
                     Layout.fillWidth: true
@@ -2707,10 +2964,145 @@ PluginPage {
             }
 
             // =====================================================
-            // 页面 5：实验性功能
+            // 页面 5：历史记录（按月翻查 + 成员筛选）
             // =====================================================
             ColumnLayout {
                 visible: root.currentPage === 5
+                spacing: 12
+                Layout.fillWidth: true
+
+                SettingCard {
+                    Layout.fillWidth: true
+                    icon.name: "ic_fluent_history_20_regular"
+                    title: qsTr("浏览范围")
+                    description: qsTr("查看当前方案的过往值日与请假明细；考勤在正常使用后自动生成")
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Button {
+                                text: qsTr("‹")
+                                enabled: root.historyMonth !== ""
+                                onClicked: root.shiftHistoryMonth(-1)
+                            }
+                            ComboBox {
+                                Layout.preferredWidth: 150
+                                enabled: (root.historyOverview.months || []).length > 0
+                                model: root.historyOverview.months || []
+                                onActivated: root.jumpHistoryMonth(index)
+                            }
+                            Button {
+                                text: qsTr("›")
+                                enabled: root.historyMonth !== ""
+                                onClicked: root.shiftHistoryMonth(1)
+                            }
+                            Item { Layout.fillWidth: true }
+                            ComboBox {
+                                Layout.preferredWidth: 150
+                                model: [qsTr("全部成员")].concat(root.historyOverview.members || [])
+                                onActivated: root.setHistoryMember(index)
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.visibleHistoryTitle
+                                  + qsTr("　·　当前方案共 %1 天考勤").arg(root.historyOverview.total || 0)
+                            font.pixelSize: 12
+                            opacity: 0.65
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: qsTr("值日明细")
+                    font.pixelSize: 13
+                    font.bold: true
+                    visible: root.visibleHistory.length > 0
+                }
+
+                Repeater {
+                    model: root.visibleHistory
+
+                    delegate: ColumnLayout {
+                        id: historyRow
+                        required property var modelData
+
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Text {
+                                Layout.preferredWidth: 128
+                                text: historyRow.modelData.date + " "
+                                      + root.weekdayLabel(historyRow.modelData.date)
+                                font.pixelSize: 12
+                                opacity: 0.6
+                            }
+                            Text {
+                                text: historyRow.modelData.groupName
+                                font.pixelSize: 12
+                                font.bold: true
+                            }
+                            Text {
+                                visible: historyRow.modelData.switched
+                                text: qsTr("调换")
+                                font.pixelSize: 10
+                                color: "#FFFFFF"
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: -3
+                                    radius: 6
+                                    color: "#E5A100"
+                                    z: -1
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.formatRecordMembers(historyRow.modelData.members)
+                            font.pixelSize: 12
+                            opacity: 0.75
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.visibleHistory.length === 0 && root.historyMonth !== ""
+                    text: qsTr("该月没有当前方案的值日记录")
+                    opacity: 0.55
+                    font.pixelSize: 12
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: root.historyMonth === ""
+                    text: qsTr("暂无历史记录。考勤在使用部件/设置页后按天自动生成，请假可在「请假管理」中标记")
+                    opacity: 0.55
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            // =====================================================
+            // 页面 6：实验性功能
+            // =====================================================
+            ColumnLayout {
+                visible: root.currentPage === 6
                 spacing: 12
                 Layout.fillWidth: true
 
@@ -2783,10 +3175,10 @@ PluginPage {
             }
 
             // =====================================================
-            // 页面 6：备份 / 迁移
+            // 页面 7：备份 / 迁移
             // =====================================================
             ColumnLayout {
-                visible: root.currentPage === 6
+                visible: root.currentPage === 7
                 spacing: 12
                 Layout.fillWidth: true
 
@@ -2806,7 +3198,7 @@ PluginPage {
                             onToggled: root.backupDisplay = checked
                         }
                         CheckBox {
-                            text: qsTr("人员设置（分组与成员）")
+                            text: qsTr("值日方案与成员（整套备份）")
                             checked: root.backupPeople
                             onToggled: root.backupPeople = checked
                         }
