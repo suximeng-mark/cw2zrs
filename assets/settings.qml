@@ -496,20 +496,34 @@ PluginPage {
     property var previewColRowData: root.previewColumnRows()   // 预览：两列对齐
     property var taskRowData: root.taskRows()                  // 临时调整：本轮成员
 
+    // 结构性变更（增删成员）必须给 g.members 换一个**新的数组对象**。
+    // 原地 push 不会改变对象身份，currentMembers 这个派生属性重新求值后得到的
+    // 还是同一个 QVariant，Qt 判定「值没变」就不发变更通知，Repeater 不重建
+    // —— 表现就是「点了 + 新增成员没反应」（已用真 Qt 最小实验复现验证）。
+    // 反过来，字段编辑 setMemberField 必须保持原地改：那会触发重建、输入框失焦。
+    function replaceMembers(groupIndex, members) {
+        var g = root.groupsData[groupIndex]
+        if (!g) return false
+        g.members = members
+        root.groupsData = root.groupsData.slice()
+        root.bumpEdit()
+        return true
+    }
+
     function addMember() {
         var g = root.groupAt(root.currentGroupIndex)
         if (!g) return
-        g.members.push({ name: "", task: "" })
-        root.groupsData = root.groupsData.slice()
-        root.bumpEdit()
+        var list = (g.members || []).slice()
+        list.push({ name: "", task: "" })
+        root.replaceMembers(root.currentGroupIndex, list)
     }
 
     function removeMember(memberIndex) {
         var g = root.groupAt(root.currentGroupIndex)
-        if (!g) return
-        g.members.splice(memberIndex, 1)
-        root.groupsData = root.groupsData.slice()
-        root.bumpEdit()
+        var list = (g && g.members) || []
+        if (!g || memberIndex < 0 || memberIndex >= list.length) return
+        root.replaceMembers(root.currentGroupIndex,
+                            list.slice(0, memberIndex).concat(list.slice(memberIndex + 1)))
     }
 
     function removeGroup(groupIndex) {
@@ -530,6 +544,7 @@ PluginPage {
     function importMembers(groupIndex, text) {
         var g = root.groupsData[groupIndex]
         if (!g) return 0
+        var list = (g.members || []).slice()
         var added = 0
         var lines = text.split(/\r?\n/)
         for (var i = 0; i < lines.length; i++) {
@@ -539,13 +554,10 @@ PluginPage {
             var name = (parts[0] || "").trim()
             if (!name) continue
             var task = parts.length > 1 ? parts.slice(1).join(" ").trim() : ""
-            g.members.push({ name: name, task: task })
+            list.push({ name: name, task: task })
             added++
         }
-        if (added > 0) {
-            root.groupsData = root.groupsData.slice()
-            root.bumpEdit()
-        }
+        if (added > 0) root.replaceMembers(groupIndex, list)
         return added
     }
 
