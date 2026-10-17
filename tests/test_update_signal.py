@@ -79,7 +79,7 @@ def make_plugin(app=None):
     p._update_cancelled = threading.Event()
     p._update_state = {
         "status": "idle", "latest": "", "current": "",
-        "download": "", "page": "", "msg": "",
+        "download": "", "page": "", "msg": "", "source": "", "tried": 0,
     }
     p._schedule_config_flush = lambda: None
     return p
@@ -122,9 +122,10 @@ def test_signal_arrives_from_worker():
 
     # 模拟 check_update：起后台线程跑 _fetch_update
     p._update_cancelled.clear()
+    p._settings["update_source"] = "https://example/api"
     p._update_state = {"status": "checking", "latest": "", "current": p.current_version(),
-                       "download": "", "page": "", "msg": ""}
-    t = threading.Thread(target=p._fetch_update, args=("https://example/api",), daemon=True)
+                       "download": "", "page": "", "msg": "", "source": "", "tried": 0}
+    t = threading.Thread(target=p._fetch_update, daemon=True)
     t.start()
     t.join(5)
 
@@ -132,6 +133,7 @@ def test_signal_arrives_from_worker():
     check("后台线程的结果送达主线程", ok, True)
     check("信号带回状态为 available", received and received[0] == "available", True)
     check("版本号已解析", p._update_state["latest"], "99.0.0")
+    check("命中第一个可用源", p._update_state["tried"], 1)
     check("下载直链已解析", p._update_state["download"], "https://example/p.cwplugin")
 
 
@@ -143,9 +145,11 @@ def test_cancelled_thread_does_not_emit():
 
     fake_urlopen({"tag_name": "v99.0.1"})
     p._update_cancelled.set()          # 模拟卸载已发生
-    p._fetch_update("https://example/api")
+    p._fetch_update()
     check("已取消时不发信号", len(received), 0)
-    check("状态仍然写回了（供下次读取）", p._update_state["latest"], "99.0.1")
+    # 取消点在探测之前：卸载中的插件没必要再发请求、也没人会读结果
+    check("已取消时直接返回、不写状态", p._update_state["latest"], "")
+    check("已取消时不记录尝试次数", p._update_state["tried"], 0)
 
 
 class Emitter(QObject):

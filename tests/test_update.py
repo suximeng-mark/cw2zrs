@@ -139,11 +139,40 @@ def test_settings_validation():
     check("接受布尔", ok["update_auto"], True)
 
 
+def test_parse_source_list():
+    f = Plugin._parse_source_list
+    check("单个", f("https://a/1.json"), ["https://a/1.json"])
+    check("换行分隔", f("https://a/1\nhttps://b/2"), ["https://a/1", "https://b/2"])
+    check("逗号分隔", f("https://a/1, https://b/2"), ["https://a/1", "https://b/2"])
+    check("顿号分隔", f("https://a/1、https://b/2"), ["https://a/1", "https://b/2"])
+    check("去重", f("https://a/1\nhttps://a/1"), ["https://a/1"])
+    check("丢非法项", f("javascript:x\nhttps://ok/1\nfile:///c"),
+          ["https://ok/1"])
+    check("全非法", f("javascript:x"), [])
+    check("空", f(""), [])
+    check("None", f(None), [])
+
+
 def test_source_selection():
+    gh = m.BUILTIN_UPDATE_SOURCES[0]
     p = make_plugin()
-    check("默认走内置源", p._update_source_url(), m.DEFAULT_UPDATE_SOURCE)
+    check("默认只用内置源", p._candidate_sources(), [gh])
     p2 = make_plugin({"update_source": "https://mirror/x"})
-    check("自定义源优先", p2._update_source_url(), "https://mirror/x")
+    check("自定义源排在最前", p2._candidate_sources(),
+          ["https://mirror/x", gh])
+    p3 = make_plugin({"update_source": "https://gitee/x\nhttps://b/2"})
+    check("多个自定义源保持顺序", p3._candidate_sources()[:2],
+          ["https://gitee/x", "https://b/2"])
+    p4 = make_plugin({"update_source": gh})
+    check("与内置重复时去重", p4._candidate_sources(), [gh])
+    check("展示用的主源是第一个", p4._update_source_url(), gh)
+
+
+def test_settings_accept_multiple():
+    ok = Plugin._normalize_settings(
+        {"update_source": "javascript:x, https://a/1\nhttps://b/2"})
+    check("逐项校验后保留有效项", ok["update_source"].split("\n"),
+          ["https://a/1", "https://b/2"])
 
 
 def test_state_payload():
@@ -167,7 +196,9 @@ def test_save_update_settings():
     # _normalize_settings 的契约是「非法值保留原值」（与其余设置项一致），
     # 所以危险协议不会写进去，但也不会把已填的地址清掉
     Plugin.save_update_settings(p, True, "javascript:alert(1)")
-    check("危险协议不生效", p._settings["update_source"], "https://m/x")
+    check("危险协议不生效（保留原值）", p._settings["update_source"], "https://m/x")
+    Plugin.save_update_settings(p, True, "")
+    check("主动清空可以存空", p._settings["update_source"], "")
 
 
 # ------------------------------------------------------------ 失败路径
@@ -193,13 +224,15 @@ def test_fetch_failures():
     # HTTP 错误
     _patch_urlopen(urllib.error.HTTPError("u", 402, "Payment Required", {}, None))
     p = make_plugin()
-    p._fetch_update("https://plaza.example/x")
+    p._fetch_update()
     check("HTTP 错误状态", p._update_state["status"], "error")
-    check("HTTP 错误提示", p._update_state["msg"], "更新源返回 HTTP 402")
+    check("HTTP 错误提示含全部源", "HTTP 402" in p._update_state["msg"], True)
+    check("提示列出所有候选源",
+          all(u in p._update_state["msg"] for u in p._candidate_sources()), True)
 
     # 连不上
     _patch_urlopen(urllib.error.URLError("boom"))
-    p._fetch_update("https://dead.example/x")
+    p._fetch_update()
     check("连不上状态", p._update_state["status"], "error")
     check("连不上提示含原因", "boom" in p._update_state["msg"], True)
 
@@ -217,7 +250,7 @@ def test_fetch_failures():
             return False
 
     urllib.request.urlopen = lambda *a, **k: _Resp()
-    p._fetch_update("https://weird.example/x")
+    p._fetch_update()
     check("非 JSON 状态", p._update_state["status"], "error")
     check("非 JSON 提示", "无法解析" in p._update_state["msg"], True)
 
@@ -233,9 +266,9 @@ def test_fetch_failures():
             return False
 
     urllib.request.urlopen = lambda *a, **k: _Empty()
-    p._fetch_update("https://empty.example/x")
+    p._fetch_update()
     check("空壳状态", p._update_state["status"], "error")
-    check("空壳提示", p._update_state["msg"], "更新源没有返回可识别的版本号")
+    check("空壳提示含原因", "可识别的版本号" in p._update_state["msg"], True)
 
     _restore_urlopen()
 
@@ -267,18 +300,20 @@ def test_fetch_success_states():
     respond({"tag_name": f"v{newer}",
              "html_url": "https://g/page",
              "assets": [{"browser_download_url": "https://g/p.cwplugin"}]})
-    p._fetch_update("https://x")
+    p._fetch_update()
     check("发现新版本", p._update_state["status"], "available")
     check("最新版本号", p._update_state["latest"], newer)
     check("下载直链", p._update_state["download"], "https://g/p.cwplugin")
     check("当前版本已填", p._update_state["current"], cur)
+    # 该用例没有配置自定义源，第一个候选就是内置 GitHub
+    check("记录了命中源", p._update_state["source"], m.BUILTIN_UPDATE_SOURCES[0])
 
     respond({"tag_name": f"v{cur}"})
-    p._fetch_update("https://x")
+    p._fetch_update()
     check("同版本=已是最新", p._update_state["status"], "latest")
 
     respond({"tag_name": f"v{older}"})
-    p._fetch_update("https://x")
+    p._fetch_update()
     check("旧版本不提示", p._update_state["status"], "latest")
 
     _restore_urlopen()
@@ -294,7 +329,9 @@ def main() -> int:
     test_is_newer()
     test_extract_update()
     test_settings_validation()
+    test_parse_source_list()
     test_source_selection()
+    test_settings_accept_multiple()
     test_state_payload()
     test_save_update_settings()
     test_fetch_failures()

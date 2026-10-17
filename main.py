@@ -86,8 +86,11 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 }
 
 # 备用更新服务：官方插件广场（plaza.cw.rinlit.cn）不可用时的兜底检查源。
-# 内置源是本插件自己的 GitHub Release —— 广场挂了也照样能发现有新版本。
-DEFAULT_UPDATE_SOURCE = "https://api.github.com/repos/suximeng-mark/cw2zrs/releases/latest"
+# 逐个尝试，第一个能读出版本号的即采用；用户填的地址排在最前。
+# Gitee 镜像的地址填进设置页的「备用更新地址」即可自动参与尝试。
+BUILTIN_UPDATE_SOURCES = (
+    "https://api.github.com/repos/suximeng-mark/cw2zrs/releases/latest",
+)
 UPDATE_TIMEOUT_SEC = 8
 UPDATE_CHECK_DELAY_MS = 1500  # 进设置页后延迟多久自动检查（避开页面加载高峰）
 
@@ -444,12 +447,15 @@ class Plugin(CW2Plugin):
             out["reminder_skip_holiday"] = raw["reminder_skip_holiday"]
         if isinstance(raw.get("update_auto"), bool):
             out["update_auto"] = raw["update_auto"]
-        # 只接受 http/https，避免把任意本地路径当成更新源
-        src = str(raw.get("update_source", "") or "").strip()
-        if not src:
+        # 备用更新地址支持多个（换行/逗号分隔），逐个校验只留 http/https。
+        # 规则与其余设置项一致：填了但一个都不合法 → 保留原值（让用户看到
+        # 「没保存上」而不是文本凭空消失）；主动清空 → 存空串。
+        raw_src = str(raw.get("update_source", "") or "")
+        urls = Plugin._parse_source_list(raw_src)
+        if urls:
+            out["update_source"] = "\n".join(urls)
+        elif not raw_src.strip():
             out["update_source"] = ""
-        elif src.lower().startswith(("http://", "https://")):
-            out["update_source"] = src
 
         time_str = str(raw.get("reminder_time", "") or "").strip()
         if REMINDER_TIME_RE.fullmatch(time_str):
@@ -2190,9 +2196,38 @@ class Plugin(CW2Plugin):
             page = download
         return version, download, page
 
+    @staticmethod
+    def _parse_source_list(raw: Any) -> List[str]:
+        """把用户填的备用地址拆成有序、去重的 http/https 列表。
+
+        支持换行 / 逗号 / 顿号分隔；非法项直接丢弃，不影响其余地址。
+        """
+        text = str(raw or "")
+        parts = text.replace(",", "\n").replace("、", "\n").split("\n")
+        out: List[str] = []
+        for part in parts:
+            url = part.strip()
+            if not url or url in out:
+                continue
+            if url.lower().startswith(("http://", "https://")):
+                out.append(url)
+        return out
+
+    def _candidate_sources(self) -> List[str]:
+        """本次要依次尝试的更新源：用户填的在前，内置源兜底。
+
+        单个地址不通时会自动试下一个（官方广场/网络抖动时用户体验差别很大）。
+        """
+        out = self._parse_source_list(self._settings.get("update_source"))
+        for url in BUILTIN_UPDATE_SOURCES:
+            if url not in out:
+                out.append(url)
+        return out
+
     def _update_source_url(self) -> str:
-        """实际使用的更新源：用户填的备用地址优先，留空则用内置源。"""
-        return (self._settings.get("update_source") or "").strip() or DEFAULT_UPDATE_SOURCE
+        """主更新源（第一个候选），仅用于展示。"""
+        sources = self._candidate_sources()
+        return sources[0] if sources else ""
 
     def _auto_check_update(self) -> None:
         """启动后的延迟自动检查（只查一次，且用户开了开关才查）。"""
@@ -2201,30 +2236,28 @@ class Plugin(CW2Plugin):
 
     @Slot(result=bool)
     def check_update(self) -> bool:
-        """检查备用更新源；请求放到后台线程，绝不阻塞 UI。"""
+        """检查更新；所有候选源依次尝试，请求放到后台线程，绝不阻塞 UI。"""
         if self._update_state["status"] == "checking":
             return False
-        url = self._update_source_url()
         self._update_cancelled.clear()
         self._update_state = {
             "status": "checking", "latest": "", "current": self.current_version(),
-            "download": "", "page": "", "msg": "",
+            "download": "", "page": "", "msg": "", "source": "", "tried": 0,
         }
-        threading.Thread(
-            target=self._fetch_update, args=(url,), daemon=True
-        ).start()
+        threading.Thread(target=self._fetch_update, daemon=True).start()
         return True
 
-    def _fetch_update(self, url: str) -> None:
-        """后台线程：拉取更新源。结果写回 _update_state，再发信号让 UI 读取。"""
+    def _probe_source(self, url: str) -> Dict[str, Any]:
+        """试一个更新源。返回单源结论，绝不抛异常。
+
+        ok=True 表示成功读到版本号（无论是否比当前版本新）；
+        ok=False 时 error 里是可读的原因，供汇总成最终提示。
+        """
         import urllib.error
         import urllib.request
 
-        state = {
-            "status": "error", "latest": "", "current": self.current_version(),
-            "download": "", "page": "",
-            "msg": f"无法访问更新源：{url}",
-        }
+        result: Dict[str, Any] = {"ok": False, "version": "", "download": "",
+                                  "page": "", "error": ""}
         try:
             req = urllib.request.Request(
                 url,
@@ -2235,29 +2268,60 @@ class Plugin(CW2Plugin):
             )
             with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT_SEC) as resp:
                 raw = resp.read(512_000)  # 限流：更新源不该返回巨大的包
-            latest, download, page = self._extract_update(json.loads(raw.decode("utf-8")))
-            if not latest:
-                state["msg"] = "更新源没有返回可识别的版本号"
-            elif self._is_newer(latest, state["current"]):
-                state.update({
-                    "status": "available", "latest": latest,
-                    "download": download, "page": page, "msg": "",
-                })
-            else:
-                state.update({
-                    "status": "latest", "latest": latest,
-                    "page": page, "msg": "",
-                })
+            version, download, page = self._extract_update(json.loads(raw.decode("utf-8")))
+            if not version:
+                result["error"] = "没有返回可识别的版本号"
+                return result
+            result.update({"ok": True, "version": version,
+                           "download": download, "page": page})
         except urllib.error.HTTPError as e:
-            state["msg"] = f"更新源返回 HTTP {e.code}"
+            result["error"] = f"HTTP {e.code}"
         except (urllib.error.URLError, TimeoutError) as e:
-            reason = getattr(e, "reason", e)
-            state["msg"] = f"更新源连接失败：{reason}"
+            result["error"] = f"连接失败：{getattr(e, 'reason', e)}"
         except (ValueError, OSError) as e:
-            state["msg"] = f"更新源响应无法解析：{e}"
+            result["error"] = f"响应无法解析：{e}"
         except Exception as e:  # 兜底：网络栈可能抛出任何东西
-            logger.warning(f"[值日生] 检查更新异常：{e}")
-            state["msg"] = f"检查更新失败：{e}"
+            logger.warning(f"[值日生] 检查更新异常（{url}）：{e}")
+            result["error"] = f"检查失败：{e}"
+        return result
+
+    def _fetch_update(self) -> None:
+        """后台线程：依次尝试所有候选源，第一个成功的说了算。
+
+        全部失败时把每个源的原因都列出来，而不是只报最后一个 ——
+        「两个地址都不通」和「地址填错了」需要看到的线索完全不同。
+        """
+        current = self.current_version()
+        failures: List[str] = []
+        tried = 0
+        state: Dict[str, Any] = {
+            "status": "error", "latest": "", "current": current,
+            "download": "", "page": "", "msg": "", "source": "", "tried": 0,
+        }
+        for url in self._candidate_sources():
+            if self._update_cancelled.is_set():
+                logger.info("[值日生] 插件已卸载，中止更新检查")
+                return
+            tried += 1
+            got = self._probe_source(url)
+            if got["ok"]:
+                state.update({
+                    "latest": got["version"], "download": got["download"],
+                    "page": got["page"], "source": url, "tried": tried,
+                    "status": ("available" if self._is_newer(got["version"], current)
+                               else "latest"),
+                    "msg": "",
+                })
+                if tried > 1:
+                    logger.info(
+                        f"[值日生] 前 {tried - 1} 个更新源不可用，已改用：{url}"
+                    )
+                break
+            failures.append(f"{url}（{got['error']}）")
+        else:
+            state["msg"] = ("所有更新源都不可用：" + "；".join(failures)
+                            if failures else "没有配置任何可用的更新源")
+
         self._update_state = state
         # 必须在持有 self 的前提下先看取消标志：线程回来时插件可能已卸载，
         # 那时 self 对应的 C++ QObject 已销毁，emit 会直接崩掉整个宿主。
@@ -2274,9 +2338,12 @@ class Plugin(CW2Plugin):
     def get_update_state(self) -> Dict[str, Any]:
         """当前更新状态；界面只读，不再发请求。"""
         s = dict(self._update_state)
-        s["source"] = self._update_source_url()
+        s["sources"] = self._candidate_sources()
+        s["source"] = s.get("source") or (s["sources"][0] if s["sources"] else "")
+        # configured 是用户实际填了什么（供输入框回填），与「本次命中哪个源」区分开
+        s["configured"] = self._settings.get("update_source") or ""
         s["auto"] = bool(self._settings.get("update_auto"))
-        s["builtin"] = (self._settings.get("update_source") or "").strip() == ""
+        s["builtin"] = not self._parse_source_list(self._settings.get("update_source"))
         return s
 
     @Slot(result=bool)

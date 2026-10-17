@@ -47,7 +47,7 @@ PluginPage {
         root.updateState = root.backend.get_update_state()
         root.updateAuto = root.updateState.auto
         if (!root.updateSourceInit) {
-            root.updateSource = root.updateState.builtin ? "" : root.updateState.source
+            root.updateSource = root.updateState.configured || ""
             root.updateSourceInit = true
         }
     }
@@ -82,13 +82,25 @@ PluginPage {
             root.setResult(updateResultText, qsTr("没有可打开的更新链接"), false)
     }
 
+    // 把更新源地址缩成可读名字：api.github.com/…/cw2zrs -> GitHub · cw2zrs
+    function sourceLabel(url) {
+        var u = String(url || "")
+        if (u.indexOf("gitee.com") >= 0) return qsTr("Gitee")
+        if (u.indexOf("github.com") >= 0) return qsTr("GitHub")
+        if (!u) return qsTr("内置源")
+        return u.length > 28 ? u.substring(0, 28) + "…" : u
+    }
+
     function updateStatusText() {
         var s = root.updateState || {}
         if (s.status === "checking") return qsTr("正在检查更新…")
         if (s.status === "available")
-            return qsTr("发现新版本 %1（当前 %2）").arg(s.latest).arg(s.current)
+            return qsTr("发现新版本 %1（当前 %2，来源：%3）")
+                    .arg(s.latest).arg(s.current).arg(root.sourceLabel(s.source))
         if (s.status === "latest")
             return qsTr("已是最新版本 %1").arg(s.current || "")
+        if (s.tried > 1)
+            return qsTr("前 %1 个更新源不通，已自动改用：%2").arg(s.tried - 1).arg(root.sourceLabel(s.source))
         if (s.status === "error") return qsTr("检查失败：%1").arg(s.msg || "")
         return qsTr("尚未检查更新")
     }
@@ -3258,7 +3270,7 @@ PluginPage {
                     Layout.fillWidth: true
                     icon.name: "ic_fluent_arrow_sync_20_regular"
                     title: qsTr("备用更新服务")
-                    description: qsTr("官方插件广场不可用时，可改从备用地址检查新版本。留空则使用本插件的 GitHub Release 作为备用源")
+                    description: qsTr("官方插件广场不可用时的备用通道。填多个地址（每行一个）会按顺序自动依次尝试，前一个不通就用下一个；留空则只查内置的 GitHub Release")
 
                     ColumnLayout {
                         Layout.fillWidth: true
@@ -3306,11 +3318,15 @@ PluginPage {
                             onToggled: root.saveUpdateAuto(checked)
                         }
 
-                        TextField {
+                        TextArea {
                             Layout.fillWidth: true
-                            placeholderText: qsTr("备用更新地址（留空 = 内置 GitHub Release）")
+                            Layout.preferredHeight: 62
+                            placeholderText: qsTr("备用更新地址，一行一个（可留空；多个源会自动依次尝试）")
+                            wrapMode: TextArea.NoWrap
                             text: root.updateSource
-                            onEditingFinished: root.saveUpdateSource(text)
+                            onActiveFocusChanged: {
+                                if (!activeFocus) root.saveUpdateSource(text)
+                            }
                         }
 
                         ResultText { id: updateResultText }
