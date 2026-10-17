@@ -35,9 +35,12 @@ jobs:
         run: pip install -e .
 
       - name: Build plugin packages
-        run: |
-          cw-plugin-pack
-          cw-plugin-pack --format zip
+        # 用 tools/pack.py 而不是直接调 cw-plugin-pack：SDK 的排除集是
+        # 硬编码的、不读 .gitignore，所以 tests/ 与 .github/ 会被打进产物
+        # （tests/ 是提交进仓库的，CI 的干净 checkout 里也存在）。
+        # 包装器打包前暂存这些目录、打完包还原，并自检产物里没有混入。
+        # 本地也用同一个脚本，保证线上包与本地一致。
+        run: python tools/pack.py
 
       - name: Publish to plugin registry
         # 广场是外部服务（plaza.cw.rinlit.cn），曾整站返回 402 DEPLOYMENT_DISABLED。
