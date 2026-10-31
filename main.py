@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ClassWidgets.SDK import ConfigBaseModel, CW2Plugin, PluginAPI
+
+from datastore import DataStore
 from PySide6.QtCore import QTimer, Signal, Slot
 
 try:  # CW2 运行环境自带 loguru；缺省时退回标准库 logger，避免插件直接崩溃
@@ -228,7 +230,10 @@ class Plugin(CW2Plugin):
         self._profiles: List[Dict[str, Any]] = []
         self._active_profile_id: str = ""
         plugin_dir = Path(__file__).resolve().parent
-        self._data_dir = plugin_dir / "data"
+        # 双写存储：插件目录内的 data/ + 插件目录外的备份（见 datastore.py）。
+        # 升级时 CW2 会整体重建插件目录，data/ 会消失；外部副本负责兜底恢复。
+        self._store = DataStore(plugin_dir, "com.studentondutyshow.com")
+        self._data_dir = self._store.data_dir
         self._config_file = self._data_dir / "config.json"
         self._config_timer = QTimer(self)
         self._config_timer.setSingleShot(True)
@@ -275,6 +280,10 @@ class Plugin(CW2Plugin):
         super().on_load()
         if self.pid is None:
             return
+
+        # ⭐ 升级恢复：CW2 升级插件时会整体重建插件目录，data/ 会被清空。
+        # 这里先检查外部备份副本，把丢失的数据自动捞回来，再走正常流程。
+        self._restore_after_upgrade()
 
         # 必须在 register_plugin_model 之前迁移：注册空模型后核心会立即用 {}
         # 覆盖内存中该插件的整个配置段，旧数据必须先搬进私有文件。
@@ -647,10 +656,11 @@ class Plugin(CW2Plugin):
         return slots, idx, group
 
     def _load_config_file(self) -> Optional[Dict[str, Any]]:
+        """读私有配置：插件目录优先，缺失时回退到外部备份副本。"""
         try:
-            with open(self._config_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (FileNotFoundError, OSError, ValueError):
+            payload = self._store.read_config()
+        except Exception as e:
+            logger.warning(f"[值日生] 读取私有配置失败: {e}")
             return None
         return payload if isinstance(payload, dict) else None
 
@@ -725,19 +735,42 @@ class Plugin(CW2Plugin):
         }
 
     def _flush_config(self) -> None:
-        """把全部插件配置写入私有文件 data/config.json（原子替换，文件很小）。"""
+        """把全部插件配置写入私有文件 data/config.json（原子替换，文件很小）。
+
+        同时在插件目录外留一份副本（DataStore 双写）——升级时 CW2 会整体
+        重建插件目录，data/ 会消失，外部副本用于自动恢复。
+        """
         try:
-            self._data_dir.mkdir(parents=True, exist_ok=True)
             payload = self._build_storage_payload()
-            tmp_path = self._config_file.with_name(self._config_file.name + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._config_file)
+            if not self._store.write_config(payload):
+                logger.warning("[值日生] 私有配置写入失败")
         except Exception as e:
             logger.warning(f"[值日生] 私有配置写入失败: {e}")
 
     def _schedule_config_flush(self) -> None:
         self._config_timer.start(CONFIG_FLUSH_DELAY_MS)
+
+    def _restore_after_upgrade(self) -> None:
+        """升级后恢复数据，并把现有数据补一份到外部备份。
+
+        两种情况：
+          1. 插件目录的 data/ 没了（升级覆盖）→ 从外部备份恢复
+          2. data/ 还在但外部备份是空的（首次装本版本）→ 补一份备份
+        """
+        try:
+            restored = self._store.restore_if_missing()
+            if restored:
+                logger.info(
+                    "[值日生] 检测到升级后数据丢失，已从备份恢复：%s",
+                    "、".join(restored),
+                )
+            backed_up = self._store.backup_missing_only()
+            if backed_up:
+                logger.info(
+                    "[值日生] 已建立数据外部备份：%s", "、".join(backed_up)
+                )
+        except Exception as e:
+            logger.warning(f"[值日生] 升级恢复/备份失败: {e}")
 
     def _migrate_plugin_config(self, plugin_id: str) -> bool:
         """私有文件 data/config.json 优先；首次运行时从 configs.json 一次性迁移。
@@ -1354,12 +1387,12 @@ class Plugin(CW2Plugin):
         }
 
     def _load_history_file(self) -> List[Dict[str, Any]]:
+        """读历史记录：插件目录优先，缺失时回退到外部备份副本。"""
         try:
-            with open(self._history_path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except (FileNotFoundError, OSError, ValueError):
+            records = self._store.read_history()
+        except Exception as e:
+            logger.warning(f"[值日生] 读取历史记录失败: {e}")
             return []
-        records = payload.get("records") if isinstance(payload, dict) else None
         if not isinstance(records, list):
             return []
         return [
@@ -1369,13 +1402,10 @@ class Plugin(CW2Plugin):
         ]
 
     def _flush_history(self) -> None:
-        """把 history 同步写入独立数据文件（原子替换）。"""
+        """把 history 同步写入独立数据文件（原子替换），并留一份外部副本。"""
         try:
-            self._history_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._history_path.with_name(self._history_path.name + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump({"records": self._history}, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._history_path)
+            if not self._store.write_history(self._history):
+                logger.warning("[值日生] 历史记录写入失败")
         except Exception as e:
             logger.warning(f"[值日生] 历史记录写入失败: {e}")
 
