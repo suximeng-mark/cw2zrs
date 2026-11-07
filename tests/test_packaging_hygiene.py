@@ -11,8 +11,13 @@
   - 但 `tests/` 和 `.github/` 是**提交进仓库的**，CI 打的包里一直带着它们
   - `data/` 更严重：它是运行时私有数据目录，带出厂等于让每个新用户
     都拿到别人的成员姓名与考勤历史
+  - `RinUI/config/rin_ui.json` 是 **CW2 主程序 UI 框架的全局主题配置**，
+    `fix_cw_config.py` 会 rglob 全盘找 configs.json 并全量重写跨插件字段。
+    这两项曾经被 git 跟踪（.gitignore 对已跟踪文件无效），一直随包分发，
+    而 CW2 会把每个插件目录加进 sys.path —— 这就是「别的插件目录里冒出
+    本插件配置文件」类反馈的来源。
 
-解法是 `tools/pack.py`（打包前暂存这些目录、打完包原样放回）。
+解法是 `tools/pack.py`（副本打包 + 产物净化 + 顶层白名单自检）。
 本测试**走包装器**跑真实打包，检查 zip 条目——不是只检查 .gitignore
 有没有写（.gitignore 对打包器无效）。
 
@@ -38,10 +43,25 @@ FORBIDDEN_PREFIXES = {
     "data": "运行时私有数据（真实姓名/考勤），不应随分发包出厂",
     "tools": "打包脚本自身，打包时还在被用",
     "__pycache__": "Python 缓存（打包器已排除，这里双保险）",
+    "RinUI": "CW2 主程序的全局主题配置，绝不能随插件分发",
+}
+
+# 任意层级都不该出现的文件（配置文件 / 开发脚本 / 工程元数据）
+FORBIDDEN_NAMES = {
+    "fix_cw_config.py": "会全盘搜索并重写全局 configs.json",
+    "pyproject.toml": "工程元数据（打包时要留在 stage 供打包器读依赖）",
+    ".git-cliff.toml": "changelog 工具配置",
+    "config.json": "运行时私有配置",
+    "history.json": "运行时私有考勤历史",
+    "configs.json": "CW2 全局配置",
+    "rin_ui.json": "RinUI 全局主题配置",
 }
 
 # 必须出现在产物里 —— 少了插件就装不起来
-REQUIRED = ["main.py", "cwplugin.json", "assets/settings.qml", "assets/widget.qml"]
+REQUIRED = [
+    "main.py", "_cw2zrs_datastore.py", "cwplugin.json", "icon.png",
+    "assets/settings.qml", "assets/widget.qml",
+]
 
 passed = failed = 0
 
@@ -104,6 +124,23 @@ def main() -> int:
         tops = {n.split("/")[0] for n in names}
         for prefix, why in sorted(FORBIDDEN_PREFIXES.items()):
             check(f"{prefix}/ 已排除（{why}）", prefix in tops, False)
+
+        print("\n=== 配置文件 / 开发脚本不得随包分发 ===")
+        for name, why in sorted(FORBIDDEN_NAMES.items()):
+            hits = [n for n in names if Path(n).name == name]
+            check(f"无 {name}（{why}）", hits, [])
+
+        stray = sorted(
+            n for n in names
+            if n.lower().endswith(".json") and n != "cwplugin.json"
+            and not n.startswith("libs/")
+        )
+        check("除 cwplugin.json 外无插件侧 .json", stray, [])
+        stray_toml = sorted(
+            n for n in names
+            if n.lower().endswith(".toml") and not n.startswith("libs/")
+        )
+        check("顶层无 .toml 工程文件", stray_toml, [])
 
         print("\n=== 产物顶层实际内容 ===")
         for t in sorted(tops - set(FORBIDDEN_PREFIXES)):

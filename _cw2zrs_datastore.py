@@ -40,6 +40,22 @@
 - 相比 `%APPDATA%` 之类需要猜路径的地方，从插件位置往上两级即可推导，
   不依赖 SDK 是否暴露了「应用数据目录」接口
 
+## 绝不写到别的插件目录
+
+CW2 把**每个插件目录**都加进 `sys.path`，插件之间并不是完全隔离的。
+早期版本在推导不出 CW2 根目录时，会把备份写到 `plugins/` 下的同级隐藏
+目录（`plugins/.<id>-datastore/`）——那已经越过了本插件的边界，恰好是
+「其它插件目录里冒出本插件配置文件」这类反馈最容易踩中的坑。
+
+现在有两条硬约束：
+
+1. 只有**确认**推导出的目录是 CW2 根（存在 `configs/` 或 `plugins/`）时，
+   才允许写 `configs/plugin-data/<plugin_id>/`；目录名严格按插件 ID 隔离。
+2. 任何异常布局 / 创建失败，一律退回到**插件目录内部**的 `.datastore/`，
+   宁可失去升级兜底，也绝不在 `plugins/` 或其它位置创建文件。
+3. 所有写入目标都要通过 `_writable_target()` 校验：必须位于自身的
+   `data/` 或 `backup_dir/` 之内，否则直接拒绝写入。
+
 ## 写入的原子性
 
 备份用「先写 `.tmp` 再 `os.replace`」——和插件自己的落盘策略一致。
@@ -62,22 +78,39 @@ BACKUP_SUBDIR = ("configs", "plugin-data")
 BACKUP_FILES = ("config.json", "history.json")
 
 
+def _safe_plugin_id(plugin_id: str) -> str:
+    """插件 ID 只能当**单层目录名**用，杜绝 `../` 之类把备份写到别处。"""
+    pid = str(plugin_id or "").strip()
+    if (not pid or pid in (".", "..") or "/" in pid or "\\" in pid
+            or "\x00" in pid or pid.startswith(".")):
+        raise ValueError(f"invalid plugin id: {plugin_id!r}")
+    return pid
+
+
 def backup_dir_for(plugin_dir: Path, plugin_id: str) -> Path:
     """外部备份目录：<CW2>/configs/plugin-data/<plugin_id>/。
 
-    推导不出 CW2 根目录时（例如插件被单独解压到别处调试），
-    回退到插件目录的同级 `.datastore`，此时仍在插件目录之外。
+    只有能确认 CW2 根目录时才写到插件目录外；布局异常则退回插件目录内的
+    `.datastore/`，**绝不在 plugins/ 下或其它插件目录创建任何文件**。
     """
+    pid = _safe_plugin_id(plugin_id)
     plugin_dir = Path(plugin_dir).resolve()
-    root = plugin_dir.parents[1] if len(plugin_dir.parents) >= 2 else plugin_dir.parent
-    candidate = root.joinpath(*BACKUP_SUBDIR) / plugin_id
-    try:
-        candidate.mkdir(parents=True, exist_ok=True)
-        return candidate
-    except OSError:
-        fallback = plugin_dir.parent / f".{plugin_dir.name}-datastore" / plugin_id
-        fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+    parents = plugin_dir.parents
+    root = parents[1] if len(parents) >= 2 else plugin_dir.parent
+
+    # 标准布局 <CW2>/plugins/<id>：parents[0]=plugins, parents[1]=CW2。
+    # 必须验证 root 真的像 CW2 根目录，避免嵌套安装时误把 plugins/ 当根。
+    if (root / "configs").is_dir() or (root / "plugins").is_dir():
+        candidate = root.joinpath(*BACKUP_SUBDIR) / pid
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError:
+            pass
+
+    fallback = plugin_dir / ".datastore" / pid
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
 
 
 def _atomic_write_json(target: Path, payload: object) -> bool:
@@ -116,9 +149,30 @@ class DataStore:
 
     def __init__(self, plugin_dir: Path, plugin_id: str) -> None:
         self.plugin_dir = Path(plugin_dir).resolve()
-        self.plugin_id = plugin_id
+        self.plugin_id = _safe_plugin_id(plugin_id)
         self.data_dir = self.plugin_dir / "data"
-        self.backup_dir = backup_dir_for(self.plugin_dir, plugin_id)
+        self.backup_dir = backup_dir_for(self.plugin_dir, self.plugin_id)
+
+    # ------------------------------------------------------------ 写入边界守卫
+
+    def _writable_target(self, target: Path) -> bool:
+        """目标必须落在自己的 data/ 或备份目录内，否则拒绝写入。
+
+        CW2 会把所有插件目录加进 sys.path，模块/路径并不天然隔离。这道守卫
+        保证即使将来有人误改了路径推导，本插件也不可能把 config.json 写到
+        其它插件的目录里。
+        """
+        try:
+            resolved = Path(target).resolve()
+        except OSError:
+            return False
+        for base in (self.data_dir, self.backup_dir):
+            try:
+                resolved.relative_to(base.resolve())
+                return True
+            except (ValueError, OSError):
+                continue
+        return False
 
     # ------------------------------------------------------------------ 恢复
 
@@ -132,10 +186,10 @@ class DataStore:
         restored: List[str] = []
         for name in BACKUP_FILES:
             target = self.data_dir / name
-            if target.exists():
+            if target.exists() or not self._writable_target(target):
                 continue
             source = self.backup_dir / name
-            if not source.exists():
+            if not source.exists() or not self._writable_target(source):
                 continue
             if not _is_valid_json(source):
                 continue
@@ -159,6 +213,8 @@ class DataStore:
             target = self.backup_dir / name
             if not source.exists() or target.exists():
                 continue
+            if not (self._writable_target(source) and self._writable_target(target)):
+                continue
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
@@ -171,17 +227,25 @@ class DataStore:
 
     def write_config(self, payload: Dict) -> bool:
         """写配置到插件目录 + 外部备份。插件目录写成功才算成功。"""
-        ok = _atomic_write_json(self.data_dir / "config.json", payload)
+        local = self.data_dir / "config.json"
+        remote = self.backup_dir / "config.json"
+        if not (self._writable_target(local) and self._writable_target(remote)):
+            return False
+        ok = _atomic_write_json(local, payload)
         if ok:
-            _atomic_write_json(self.backup_dir / "config.json", payload)
+            _atomic_write_json(remote, payload)
         return ok
 
     def write_history(self, records: List[Dict]) -> bool:
         """写历史到插件目录 + 外部备份。"""
         payload = {"records": records}
-        ok = _atomic_write_json(self.data_dir / "history.json", payload)
+        local = self.data_dir / "history.json"
+        remote = self.backup_dir / "history.json"
+        if not (self._writable_target(local) and self._writable_target(remote)):
+            return False
+        ok = _atomic_write_json(local, payload)
         if ok:
-            _atomic_write_json(self.backup_dir / "history.json", payload)
+            _atomic_write_json(remote, payload)
         return ok
 
     # ------------------------------------------------------------------ 读取

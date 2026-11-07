@@ -31,7 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from datastore import BACKUP_FILES, DataStore, backup_dir_for  # noqa: E402
+from _cw2zrs_datastore import (  # noqa: E402
+    BACKUP_FILES, DataStore, backup_dir_for, _safe_plugin_id,
+)
 
 passed = 0
 failed = 0
@@ -226,6 +228,59 @@ def test_backup_dir_location():
         shutil.rmtree(root, ignore_errors=True)
 
 
+# -------------------------------------------------- 跨插件目录写入防护（回归）
+
+def test_reject_unsafe_plugin_id():
+    print("\n=== ⑧ 非法插件 ID 一律拒绝 ===")
+    for bad in ("", "..", "../com.other.plugin", "com/other/plugin",
+                "com\\other\\plugin", ".hidden"):
+        try:
+            _safe_plugin_id(bad)
+            check(f"拒绝 {bad!r}", False, True)
+        except ValueError:
+            check(f"拒绝 {bad!r}", True, True)
+    check("合法 ID 通过", _safe_plugin_id("com.test.duty"), "com.test.duty")
+
+
+def test_no_writes_outside_plugin_boundary():
+    print("\n=== ⑨ 布局异常时绝不写到 plugins/ 下 ===")
+    # 造一个「不像 CW2 根目录」的布局：没有 configs/ 也没有 plugins/
+    loose = Path(tempfile.mkdtemp(prefix="cw2_loose_"))
+    plugin_dir = loose / "standalone" / "com.test.duty"
+    plugin_dir.mkdir(parents=True)
+    try:
+        d = backup_dir_for(plugin_dir, "com.test.duty")
+        check("退回插件目录内部", str(d).startswith(str(plugin_dir)), True)
+        check("plugins/ 同级没有生成隐藏目录",
+              list(plugin_dir.parent.glob(".*-datastore")), [])
+
+        store = DataStore(plugin_dir, "com.test.duty")
+        store.write_config({"groups": []})
+        # 插件目录之外（除备份目录本身，这里备份就在插件目录内）不能有 config.json
+        outside = [p for p in loose.rglob("config.json")
+                   if not str(p.resolve()).startswith(str(plugin_dir.resolve()))]
+        check("插件目录之外没有 config.json", outside, [])
+    finally:
+        shutil.rmtree(loose, ignore_errors=True)
+
+
+def test_reject_out_of_bound_write():
+    print("\n=== ⑩ 越界写入被守卫拦截 ===")
+    root, plugin_dir = make_env()
+    try:
+        store = DataStore(plugin_dir, "com.test.duty")
+        other_dir = root / "plugins" / "com.other.plugin"
+        other_dir.mkdir(parents=True)
+        check("判定其它插件目录为越界",
+              store._writable_target(other_dir / "data" / "config.json"), False)
+        check("判定自身 data/ 为合法",
+              store._writable_target(plugin_dir / "data" / "config.json"), True)
+        check("判定自身备份目录为合法",
+              store._writable_target(store.backup_dir / "config.json"), True)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main() -> int:
     print("升级丢数据 → 自动恢复：回归测试")
     test_write_to_both_places()
@@ -235,6 +290,9 @@ def main() -> int:
     test_corrupt_backup_does_not_crash()
     test_atomic_write_no_partial_file()
     test_backup_dir_location()
+    test_reject_unsafe_plugin_id()
+    test_no_writes_outside_plugin_boundary()
+    test_reject_out_of_bound_write()
     print(f"\n{'=' * 50}\npassed {passed}, failed {failed}")
     return failed
 

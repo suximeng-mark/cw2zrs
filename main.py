@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from ClassWidgets.SDK import ConfigBaseModel, CW2Plugin, PluginAPI
 
-from datastore import DataStore
+from _cw2zrs_datastore import DataStore
 from PySide6.QtCore import QTimer, Signal, Slot
 
 try:  # CW2 运行环境自带 loguru；缺省时退回标准库 logger，避免插件直接崩溃
@@ -230,7 +230,8 @@ class Plugin(CW2Plugin):
         self._profiles: List[Dict[str, Any]] = []
         self._active_profile_id: str = ""
         plugin_dir = Path(__file__).resolve().parent
-        # 双写存储：插件目录内的 data/ + 插件目录外的备份（见 datastore.py）。
+        # 双写存储：插件目录内的 data/ + 插件目录外的备份
+        # （见 _cw2zrs_datastore.py；私有前缀避免与其它插件的同名模块串）。
         # 升级时 CW2 会整体重建插件目录，data/ 会消失；外部副本负责兜底恢复。
         self._store = DataStore(plugin_dir, "com.studentondutyshow.com")
         self._data_dir = self._store.data_dir
